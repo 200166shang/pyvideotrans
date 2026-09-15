@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,18 @@ ALIBABA_PODCAST_V2 = PodcastProfile(
 )
 
 
-_PROFILES = {ALIBABA_PODCAST_V2.id: ALIBABA_PODCAST_V2}
+# Explicit opt-in experiment; the CLI default remains the accepted v2 profile.
+ALIBABA_PODCAST_TTS_THROUGHPUT = replace(
+    ALIBABA_PODCAST_V2,
+    id="alibaba-podcast-tts-throughput",
+    tts_concurrency=8,
+    tts_soft_char_limit=250,
+)
+
+_PROFILES = {
+    profile.id: profile
+    for profile in (ALIBABA_PODCAST_V2, ALIBABA_PODCAST_TTS_THROUGHPUT)
+}
 
 
 def get_profile(profile_id: str) -> PodcastProfile:

@@ -225,6 +225,36 @@ def test_incremental_tts_matches_batch_for_complete_input(rows, max_characters):
     assert incremental == chunk_tts_rows(rows, max_characters=max_characters)
 
 
+def test_throughput_chunks_preserve_turns_and_text_across_translation_boundaries():
+    from videotrans.podcast.profiles import ALIBABA_PODCAST_TTS_THROUGHPUT
+
+    limit = ALIBABA_PODCAST_TTS_THROUGHPUT.tts_soft_char_limit
+    rows = [
+        PodcastTextRow("one", "这是一段完整的话。" * 29, "host"),
+        PodcastTextRow("two", "后面的内容保持顺序。" * 31, "host"),
+        PodcastTextRow("three", "来宾接着回应。" * 41, "guest"),
+        PodcastTextRow("four", "主持人重新发言。" * 37, "host"),
+    ]
+    chunker = IncrementalTTSChunker(max_characters=limit)
+    actual = [chunk for row in rows for chunk in chunker.add(row)]
+    actual.extend(chunker.finish())
+    assert actual == chunk_tts_rows(rows, max_characters=limit)
+    expected_chars = [
+        (row.speaker_id, char)
+        for row in rows
+        for char in row.text
+        if not char.isspace()
+    ]
+    actual_chars = [
+        (chunk.speaker_id, char)
+        for chunk in actual
+        for char in chunk.text
+        if not char.isspace()
+    ]
+    assert actual_chars == expected_chars
+    assert all(len(chunk.text) <= limit and chunk.voice == "Andre" for chunk in actual)
+
+
 @dataclass
 class ObjectRow:
     sequence_id: str
