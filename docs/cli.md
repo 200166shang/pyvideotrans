@@ -706,7 +706,7 @@ python cli.py --task podcast --resume "/absolute/path/episode-zh"
 
 需要原配置时显式指定 `--podcast-profile alibaba-podcast-v2`。恢复任务时显式指定的配置必须与该任务匹配。
 
-本轮五分钟样本耗时 38.471 秒，比历史 52.009 秒缩短 26.03%，已通过听感验收。这是单次样本证据，尚未验证长节目性能。详见 [实验与验收记录](research/podcast-tts-throughput.md)。
+本轮五分钟样本耗时 38.471 秒，比历史 52.009 秒缩短 26.03%，已通过听感验收。这是单次样本证据，尚未验证长节目性能。详见 [GitHub Issue #14](https://github.com/200166shang/pyvideotrans/issues/14)。
 
 ### 查看 ASR 耗时
 
