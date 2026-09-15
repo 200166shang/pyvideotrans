@@ -405,8 +405,23 @@
             status: state.status,
             cache_mode: state.cacheMode
           },
-          input: state.input,
-          profile: state.profile,
+          input: {
+            fingerprint: state.input.fingerprint,
+            duration_ms: state.input.durationMs,
+            language: state.input.language
+          },
+          profile: {
+            id: state.profile.id,
+            fingerprint: state.profile.fingerprint,
+            target_language: state.profile.targetLanguage,
+            region: state.profile.region,
+            providers: {
+              asr: state.profile.asr,
+              translation: state.profile.translation,
+              tts: state.profile.tts,
+              voice: state.profile.voice
+            }
+          },
           stages: state.stages.map(({ label, provider, ...stage }) => ({
             name: stage.id,
             provider,
@@ -420,11 +435,23 @@
             error_code: stage.errorCode
           })),
           totals: {
-            ...totals(state),
-            cloudCostCny: Number(totals(state).cloudCostCny.toFixed(4))
+            wall_clock_ms: totals(state).wallClockMs,
+            cloud_cost_cny: Number(totals(state).cloudCostCny.toFixed(4)),
+            retries: totals(state).retries,
+            cache_hits: totals(state).cacheHits
           },
-          output: state.output,
-          listening_quality_gate: state.qualityGate,
+          output: state.output ? {
+            format: state.output.format,
+            bitrate_kbps: state.output.bitrateKbps,
+            channels: state.output.channels,
+            duration_ms: state.output.durationMs,
+            fingerprint: state.output.fingerprint
+          } : null,
+          listening_quality_gate: {
+            status: state.qualityGate.status,
+            decided_at: state.qualityGate.decidedAt,
+            note: state.qualityGate.note
+          },
           privacy: {
             contains_credentials: false,
             contains_transcript: false,
@@ -538,7 +565,7 @@
       event.className = `event${state.lastActionAccepted ? "" : " rejected-action"}`;
       event.textContent = state.lastEvent;
 
-      document.getElementById("command").textContent = `uv run cli.py --task benchmark \\\n+  --name "output/benchmarks/english-podcast-5m.m4a" \\\n+  --benchmark-profile alibaba-podcast-v1 \\\n+  --cache-mode ${state.cacheMode} \\\n+  --report "output/benchmarks/reports/latest.json"`;
+      document.getElementById("command").textContent = `uv run cli.py --task benchmark --name "output/benchmarks/english-podcast-5m.m4a" --benchmark-profile alibaba-podcast-v1 --cache-mode ${state.cacheMode} --report "output/benchmarks/reports/latest.json"`;
 
       const running = BenchmarkModel.currentStage(state);
       document.getElementById("controls").innerHTML = `
