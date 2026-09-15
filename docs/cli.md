@@ -707,3 +707,26 @@ python cli.py --task podcast --resume "/absolute/path/episode-zh"
 需要原配置时显式指定 `--podcast-profile alibaba-podcast-v2`。恢复任务时显式指定的配置必须与该任务匹配。
 
 本轮五分钟样本耗时 38.471 秒，比历史 52.009 秒缩短 26.03%，已通过听感验收。这是单次样本证据，尚未验证长节目性能。详见 [实验与验收记录](research/podcast-tts-throughput.md)。
+
+### 查看 ASR 耗时
+
+新执行的 ASR 会把分项计时保存在运行目录的私有 `run.private.json` 中，
+公开的 production report 格式不变。只读取其中的诊断字段：
+
+```sh
+python - /absolute/path/episode-zh/run.private.json <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    state = json.load(source)
+print(json.dumps(state.get("asr_timing", {}), indent=2))
+PY
+```
+
+`*_elapsed_ms` 表示毫秒，`*_count` 表示调用次数。上传、提交、正常等待和
+重试等待分别记录；`poll_inclusive` 已包含 `status_query`（查询）、
+`result_download`（下载）和 `result_parse`（解析），不可再次相加。
+`provider_queue` 和 `provider_task` 来自服务端时间差；缺失或无效时为 `null`，
+不能当作零耗时，也不能与本机时间直接相减。
+
+恢复时只累计新观察到的工作；旧运行没有的历史数据不会补造，意外退出前尚未
+保存的计时也可能缺失。不要分享整个私有文件，其中仍包含原有的私人运行信息。

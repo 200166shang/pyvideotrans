@@ -13,6 +13,7 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -90,12 +91,27 @@ class AsrUsage:
 
 
 @dataclass(frozen=True)
+class AsrPollDiagnostics:
+    """Content-free measurements for one poll, never persisted by the client."""
+
+    status_query_elapsed_ms: int = 0
+    status_query_count: int = 0
+    result_download_elapsed_ms: int = 0
+    result_download_count: int = 0
+    result_parse_elapsed_ms: int = 0
+    result_parse_count: int = 0
+    provider_queue_elapsed_ms: int | None = None
+    provider_task_elapsed_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class AsrPollResult:
     task_id: str
     status: str
     segments: tuple[TranscriptSegment, ...] = ()
     usage: AsrUsage = AsrUsage()
     request_id: str | None = None
+    diagnostics: AsrPollDiagnostics = AsrPollDiagnostics()
 
     @property
     def is_complete(self) -> bool:
@@ -201,9 +217,12 @@ class AlibabaWholeFileAsrClient:
         transport: AlibabaAsrTransport,
         *,
         polling_policy: PollingPolicy | None = None,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._transport = transport
         self.polling_policy = polling_policy or PollingPolicy()
+        self._clock = clock
+        self.last_poll_diagnostics = AsrPollDiagnostics()
 
     def submit(
         self,
@@ -251,41 +270,64 @@ class AlibabaWholeFileAsrClient:
 
         if not task_id:
             raise ValueError("task_id is required")
-        response = self._call(self._transport.poll, task_id)
-        output = _mapping(response.get("output"), "poll output")
-        returned_task_id = _required_string(output.get("task_id"), "task_id")
-        if returned_task_id != task_id:
-            raise PermanentAlibabaAsrError(
-                "poll response task_id did not match the requested task",
-                code="MALFORMED_RESPONSE",
+        measurements: dict[str, int] = {
+            "status_query_elapsed_ms": 0,
+            "status_query_count": 0,
+            "result_download_elapsed_ms": 0,
+            "result_download_count": 0,
+            "result_parse_elapsed_ms": 0,
+            "result_parse_count": 0,
+        }
+        provider_durations: tuple[int | None, int | None] = (None, None)
+        try:
+            response = self._measure(
+                measurements, "status_query", self._call, self._transport.poll, task_id
             )
+            output = _mapping(response.get("output"), "poll output")
+            returned_task_id = _required_string(output.get("task_id"), "task_id")
+            if returned_task_id != task_id:
+                raise PermanentAlibabaAsrError(
+                    "poll response task_id did not match the requested task",
+                    code="MALFORMED_RESPONSE",
+                )
 
-        status = _required_string(output.get("task_status"), "task_status").upper()
-        request_id = _optional_string(response.get("request_id"))
-        usage = _parse_usage(response.get("usage"))
-        if status in RUNNING_STATUSES:
+            provider_durations = _provider_task_durations(output)
+            status = _required_string(output.get("task_status"), "task_status").upper()
+            request_id = _optional_string(response.get("request_id"))
+            usage = _parse_usage(response.get("usage"))
+            if status in RUNNING_STATUSES:
+                return AsrPollResult(
+                    task_id=task_id,
+                    status=status,
+                    usage=usage,
+                    request_id=request_id,
+                    diagnostics=self._diagnostics(measurements, provider_durations),
+                )
+            if status != "SUCCEEDED":
+                raise _provider_error(output, fallback=f"ASR task ended as {status}")
+
+            result_documents = self._download_successful_results(output, measurements)
+            segments = self._measure(
+                measurements,
+                "result_parse",
+                lambda: tuple(
+                    segment
+                    for document in result_documents
+                    for segment in _parse_segments(document)
+                ),
+            )
             return AsrPollResult(
                 task_id=task_id,
                 status=status,
+                segments=segments,
                 usage=usage,
                 request_id=request_id,
+                diagnostics=self._diagnostics(measurements, provider_durations),
             )
-        if status != "SUCCEEDED":
-            raise _provider_error(output, fallback=f"ASR task ended as {status}")
-
-        result_documents = self._download_successful_results(output)
-        segments = tuple(
-            segment
-            for document in result_documents
-            for segment in _parse_segments(document)
-        )
-        return AsrPollResult(
-            task_id=task_id,
-            status=status,
-            segments=segments,
-            usage=usage,
-            request_id=request_id,
-        )
+        finally:
+            self.last_poll_diagnostics = self._diagnostics(
+                measurements, provider_durations
+            )
 
     def wait_for_completion(
         self,
@@ -310,7 +352,7 @@ class AlibabaWholeFileAsrClient:
             sleeper(self.polling_policy.delay_for_attempt(attempt - 1))
 
     def _download_successful_results(
-        self, output: Mapping[str, Any]
+        self, output: Mapping[str, Any], measurements: dict[str, int]
     ) -> list[Mapping[str, Any]]:
         raw_results = output.get("results")
         if not isinstance(raw_results, Sequence) or isinstance(raw_results, (str, bytes)):
@@ -331,7 +373,15 @@ class AlibabaWholeFileAsrClient:
             result_url = _required_string(
                 result.get("transcription_url"), "transcription_url"
             )
-            documents.append(self._call(self._transport.download_result, result_url))
+            documents.append(
+                self._measure(
+                    measurements,
+                    "result_download",
+                    self._call,
+                    self._transport.download_result,
+                    result_url,
+                )
+            )
 
         if not documents:
             if failures:
@@ -341,6 +391,32 @@ class AlibabaWholeFileAsrClient:
                 code="MALFORMED_RESPONSE",
             )
         return documents
+
+    def _measure(
+        self,
+        measurements: dict[str, int],
+        name: str,
+        operation: Callable[..., Any],
+        *args: Any,
+    ) -> Any:
+        started = self._clock()
+        try:
+            return operation(*args)
+        finally:
+            measurements[f"{name}_elapsed_ms"] += max(
+                0, round((self._clock() - started) * 1000)
+            )
+            measurements[f"{name}_count"] += 1
+
+    @staticmethod
+    def _diagnostics(
+        measurements: Mapping[str, int], provider_durations: tuple[int | None, int | None]
+    ) -> AsrPollDiagnostics:
+        return AsrPollDiagnostics(
+            **measurements,
+            provider_queue_elapsed_ms=provider_durations[0],
+            provider_task_elapsed_ms=provider_durations[1],
+        )
 
     @staticmethod
     def _call(function: Callable[..., Mapping[str, Any]], *args: Any) -> Mapping[str, Any]:
@@ -441,6 +517,41 @@ class AlibabaAsrHttpTransport:
             raise AlibabaAsrTransportError(
                 str(error.reason), code="NETWORK_ERROR"
             ) from error
+
+
+def _provider_task_durations(output: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """Return provider-only deltas when its three timestamps share a time domain."""
+
+    values = tuple(
+        _parse_provider_timestamp(output.get(name))
+        for name in ("submit_time", "scheduled_time", "end_time")
+    )
+    if any(value is None for value in values):
+        return None, None
+    submit, scheduled, ended = values
+    assert submit is not None and scheduled is not None and ended is not None
+    aware = tuple(value.tzinfo is not None for value in values)
+    if len(set(aware)) != 1 or not submit <= scheduled <= ended:
+        return None, None
+    return (
+        max(0, round((scheduled - submit).total_seconds() * 1000)),
+        max(0, round((ended - scheduled).total_seconds() * 1000)),
+    )
+
+
+def _parse_provider_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if "T" not in normalized and " " not in normalized:
+        return None
+    return parsed
 
 
 def _parse_segments(document: Mapping[str, Any]) -> list[TranscriptSegment]:

@@ -51,6 +51,36 @@ TRANSLATION_CONSERVATIVE_CNY_PER_MILLION_TOKENS = 1.95
 TTS_CNY_PER_TEN_THOUSAND_CHARACTERS = 0.8
 MAX_PROVIDER_ATTEMPTS = 6
 
+ASR_TIMING_DEFAULTS = {
+    "upload_elapsed_ms": 0,
+    "upload_count": 0,
+    "submit_elapsed_ms": 0,
+    "submit_count": 0,
+    "poll_inclusive_elapsed_ms": 0,
+    "poll_inclusive_count": 0,
+    "status_query_elapsed_ms": 0,
+    "status_query_count": 0,
+    "result_download_elapsed_ms": 0,
+    "result_download_count": 0,
+    "result_parse_elapsed_ms": 0,
+    "result_parse_count": 0,
+    "poll_sleep_elapsed_ms": 0,
+    "poll_sleep_count": 0,
+    "poll_retry_sleep_elapsed_ms": 0,
+    "poll_retry_sleep_count": 0,
+    "provider_queue_elapsed_ms": None,
+    "provider_task_elapsed_ms": None,
+}
+
+ASR_POLL_DURATION_FIELDS = (
+    "status_query_elapsed_ms",
+    "status_query_count",
+    "result_download_elapsed_ms",
+    "result_download_count",
+    "result_parse_elapsed_ms",
+    "result_parse_count",
+)
+
 
 class UploadAudio(Protocol):
     def __call__(self, source: Path) -> str: ...
@@ -171,6 +201,7 @@ class PodcastCoordinator:
                 "input_fingerprint": input_fingerprint,
                 "input_duration_ms": duration_ms,
                 "asr_submission_state": "not_started",
+                "asr_timing": dict(ASR_TIMING_DEFAULTS),
                 "stage_elapsed_ms": {},
                 "chunk_elapsed_ms": {"translate": {}, "tts": {}},
             }
@@ -423,11 +454,17 @@ class PodcastCoordinator:
                         "ASR submission may have been accepted before interruption; "
                         "verify it manually instead of submitting again",
                     )
-                audio_url = self.runtime.upload_audio(source)
+                audio_url = self._time_asr_operation(
+                    state, "upload", lambda: self.runtime.upload_audio(source)
+                )
                 state["asr_submission_state"] = "in_flight"
                 atomic_write_json(run_directory / PRIVATE_STATE_NAME, state)
-                submitted = self.runtime.asr.submit(
-                    audio_url, language=self.profile.source_language
+                submitted = self._time_asr_operation(
+                    state,
+                    "submit",
+                    lambda: self.runtime.asr.submit(
+                        audio_url, language=self.profile.source_language
+                    ),
                 )
                 manifest.set_asr_task_id(submitted.task_id)
                 store.save(manifest)
@@ -474,7 +511,15 @@ class PodcastCoordinator:
         poll_attempt = 0
         while True:
             try:
-                result = self.runtime.asr.poll(task_id)
+                try:
+                    result = self._time_asr_operation(
+                        state, "poll_inclusive", lambda: self.runtime.asr.poll(task_id)
+                    )
+                finally:
+                    self._merge_asr_poll_diagnostics(
+                        state,
+                        getattr(self.runtime.asr, "last_poll_diagnostics", None),
+                    )
             except Exception as error:
                 if not getattr(error, "retryable", False) or transient_failures >= 5:
                     raise
@@ -482,12 +527,15 @@ class PodcastCoordinator:
                 transient_failures += 1
                 state["asr_poll_retries"] = int(state.get("asr_poll_retries", 0)) + 1
                 atomic_write_json(run_directory / PRIVATE_STATE_NAME, state)
-                self._sleeper(delay)
+                self._time_asr_operation(
+                    state, "poll_retry_sleep", lambda delay=delay: self._sleeper(delay)
+                )
                 continue
             if result.is_complete:
                 return result
-            self._sleeper(
-                self.runtime.asr.polling_policy.delay_for_attempt(poll_attempt)
+            delay = self.runtime.asr.polling_policy.delay_for_attempt(poll_attempt)
+            self._time_asr_operation(
+                state, "poll_sleep", lambda delay=delay: self._sleeper(delay)
             )
             poll_attempt += 1
 
@@ -1132,6 +1180,49 @@ class PodcastCoordinator:
         timings = state.setdefault("stage_elapsed_ms", {})
         timings[name] = int(timings.get(name, 0)) + elapsed
         atomic_write_json(run_directory / PRIVATE_STATE_NAME, state)
+
+    def _time_asr_operation(
+        self, state: dict[str, Any], name: str, operation: Callable[[], Any]
+    ) -> Any:
+        """Measure one ASR operation, including failed provider calls."""
+
+        started = self._clock()
+        try:
+            return operation()
+        finally:
+            elapsed = max(0, round((self._clock() - started) * 1000))
+            timings = state.setdefault("asr_timing", dict(ASR_TIMING_DEFAULTS))
+            for field, default in ASR_TIMING_DEFAULTS.items():
+                timings.setdefault(field, default)
+            timings[f"{name}_elapsed_ms"] = int(
+                timings[f"{name}_elapsed_ms"]
+            ) + elapsed
+            timings[f"{name}_count"] = int(timings[f"{name}_count"]) + 1
+
+    @staticmethod
+    def _merge_asr_poll_diagnostics(state: dict[str, Any], diagnostics: Any) -> None:
+        """Accumulate client subphases nested inside the inclusive poll measurement."""
+
+        if diagnostics is None:
+            return
+        if isinstance(diagnostics, Mapping):
+            values = diagnostics
+        else:
+            try:
+                values = asdict(diagnostics)
+            except TypeError:
+                return
+        timings = state.setdefault("asr_timing", dict(ASR_TIMING_DEFAULTS))
+        for field, default in ASR_TIMING_DEFAULTS.items():
+            timings.setdefault(field, default)
+        for field in ASR_POLL_DURATION_FIELDS:
+            value = values.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                timings[field] = int(timings[field]) + value
+        for field in ("provider_queue_elapsed_ms", "provider_task_elapsed_ms"):
+            value = values.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                timings[field] = value
 
     def _add_chunk_elapsed(
         self,
