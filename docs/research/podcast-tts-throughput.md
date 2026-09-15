@@ -51,3 +51,21 @@ A candidate duration is fixed overhead plus allocated original variable work, mu
 | **250 / 8** | **38.500–41.562** | **20.09%–25.97%** |
 
 These are scenario envelopes, not confidence intervals. 250/8 is selected because it beats 250/6 by 1.880–2.926 seconds throughout the explored grid. Both smaller ceilings produce 14 chunks on these saved translations versus 12 at 500; earlier sealing matters as well as request count. No model, voice, rate limit or production default changes.
+
+## Single paid candidate result
+
+Candidate `tts-throughput-20260915-165255`, code commit `f16acd6`, completed once with the fixed source and explicit `alibaba-podcast-tts-throughput` profile:
+
+- End-to-end cold wall clock: **38.471 seconds**, versus historical **52.009 seconds**; **26.030% reduction**, passing the 46.8081-second gate.
+- Estimated cost: **CNY 0.30199705**, or **CNY 3.6238 per source hour**, below the informational 3.85 watchline. These are usage-based estimates, not reconciled invoices.
+- 12 translation and 14 synthesis chunks committed; zero retries; each logical chunk has one observed start and one attempt.
+- Single process, cold cache, zero cache hits; fixed input fingerprint and experimental profile verified.
+- Contiguous sealed synthesis plan, exact batch-oracle chunk identities, artifact receipts/hashes and final report fingerprint verified. Final MP3 is 48 kHz mono 64 kbps and passes complete FFmpeg decode.
+- Listening review is **pending**. The local review audio concatenates the first, centered and last 60 seconds. The agent does not infer listener acceptance from automated integrity.
+- Exactly one paid candidate was used. No new baseline, confirmation or long-programme run was performed. This historical comparison supports a promising single sample, not a causal/stable or long-programme performance claim. The accepted v2 CLI default remains unchanged.
+
+## Verification and review
+
+Before the paid run, the full podcast suite passed **193 tests**. Review fixes then passed **18 targeted replay tests** (including new dependency-time regression coverage). Changed Python files pass Ruff and compilation; full-directory Ruff identified 11 existing base-revision findings, one import-order finding was removed while touching the shared replay module, leaving unrelated legacy findings outside this scope.
+
+Standards review found missing dependency-prefix timing validation and a private clock coupling. The implementation now rejects TTS releases before their translation prefix has committed and exposes the shared `VirtualClock`; both changes were reverified. Spec review checked the opt-in profile delta, historical timing threshold, one-run limit and pending listener gate. No unresolved blocking finding remains for this experimental slice.
