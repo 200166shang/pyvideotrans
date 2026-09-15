@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>中文播客 Benchmark 契约原型</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17212b;
+      --muted: #65717d;
+      --paper: #f5f2ea;
+      --card: #fffdf8;
+      --line: #d9d3c7;
+      --accent: #176b5b;
+      --accent-soft: #dcebe5;
+      --danger: #a23a32;
+      --warning: #a46b13;
+      --shadow: 0 16px 40px rgba(40, 46, 44, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font: 15px/1.55 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1120px, calc(100% - 32px));
+      margin: 48px auto 80px;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font: 700 clamp(30px, 5vw, 52px)/1.08 ui-serif, Georgia, serif; letter-spacing: -0.03em; }
+    h2 { font-size: 18px; margin-bottom: 16px; }
+    h3 { font-size: 14px; margin-bottom: 8px; }
+    code, pre { font-family: "SFMono-Regular", Consolas, monospace; }
+
+    .eyebrow {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .lede { max-width: 820px; color: #3f4a53; font-size: 17px; }
+    .question { border-left: 4px solid var(--accent); padding-left: 18px; margin: 24px 0 34px; }
+
+    .grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 18px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+
+    .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .metric { border: 1px solid var(--line); border-radius: 12px; padding: 13px; background: white; }
+    .metric span { display: block; color: var(--muted); font-size: 12px; }
+    .metric strong { display: block; font-size: 21px; margin-top: 3px; }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: #ece9e2;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #7a8187; }
+    .status.running, .status.awaiting_review { background: #fff0cf; color: #704b0e; }
+    .status.running::before, .status.awaiting_review::before { background: var(--warning); }
+    .status.accepted, .status.succeeded, .status.cached { background: var(--accent-soft); color: #0e5749; }
+    .status.accepted::before, .status.succeeded::before, .status.cached::before { background: var(--accent); }
+    .status.failed, .status.rejected { background: #f7dedb; color: #812a25; }
+    .status.failed::before, .status.rejected::before { background: var(--danger); }
+
+    .stages { display: grid; gap: 8px; margin-top: 16px; }
+    .stage {
+      display: grid;
+      grid-template-columns: 118px 1fr auto;
+      gap: 12px;
+      align-items: center;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .stage:first-child { border-top: 0; padding-top: 0; }
+    .stage-meta { color: var(--muted); font-size: 12px; }
+    .stage-numbers { text-align: right; font-variant-numeric: tabular-nums; }
+
+    .event {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: #edf0ef;
+      color: #33403d;
+    }
+    .event.rejected-action { background: #f7dedb; color: #812a25; }
+
+    .command {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #17212b;
+      color: #e8f1ee;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 18px;
+    }
+
+    .profile { margin: 0; display: grid; grid-template-columns: 98px 1fr; gap: 7px 12px; }
+    .profile dt { color: var(--muted); }
+    .profile dd { margin: 0; }
+
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+    button {
+      appearance: none;
+      border: 1px solid #aaa89f;
+      border-radius: 10px;
+      background: white;
+      color: var(--ink);
+      padding: 9px 12px;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    button.danger { color: var(--danger); }
+    button:disabled { opacity: 0.42; cursor: not-allowed; }
+
+    .wide { grid-column: 1 / -1; }
+    .tabs { display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 12px; }
+    .tabs button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+    .walkthrough { margin-top: 18px; }
+    .steps { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .steps button.done { background: #edf0ef; color: var(--muted); text-decoration: line-through; }
+
+    details { margin-top: 16px; }
+    summary { cursor: pointer; font-weight: 700; color: var(--accent); }
+    pre.report {
+      max-height: 520px;
+      overflow: auto;
+      background: #202a33;
+      color: #e7ecef;
+      border-radius: 12px;
+      padding: 16px;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .contract-note { color: var(--muted); font-size: 13px; margin-bottom: 0; }
+
+    @media (max-width: 800px) {
+      main { margin-top: 28px; }
+      .grid { grid-template-columns: 1fr; }
+      .summary { grid-template-columns: repeat(2, 1fr); }
+      .stage { grid-template-columns: 90px 1fr; }
+      .stage-numbers { grid-column: 2; text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">Throwaway logic prototype · Wayfinder</p>
+    <h1>一次生产运行，究竟该怎样被记录？</h1>
+    <div class="question">
+      <p><strong>要回答的问题：</strong>最小的 CLI 调用和生产报告，能否同时表达冷启动、缓存恢复、云端重试、阶段成本，以及最终由收听者接受或拒绝的结果？</p>
+      <p class="contract-note">页面中的时间和费用是演示数据，不是 Benchmark 结果；所有状态都只存在于浏览器内存。</p>
+    </div>
+
+    <section class="grid">
+      <article class="card">
+        <h2>当前生产运行</h2>
+        <div id="runStatus"></div>
+        <div class="summary" id="summary"></div>
+        <div class="stages" id="stages"></div>
+        <div class="event" id="event"></div>
+      </article>
+
+      <aside class="card">
+        <h2>最小 CLI 契约</h2>
+        <pre class="command" id="command"></pre>
+        <dl class="profile">
+          <dt>配置档</dt><dd><code>alibaba-podcast-v1</code></dd>
+          <dt>输入</dt><dd>固定 300 秒英文节目</dd>
+          <dt>输出</dt><dd>自然节奏、单声道 64 kbps MP3</dd>
+          <dt>隐私</dt><dd>报告只存指纹，不存密钥或正文</dd>
+          <dt>验收</dt><dd>生产结束后由收听者接受或拒绝</dd>
+        </dl>
+      </aside>
+
+      <article class="card wide">
+        <h2>自由操作</h2>
+        <div class="controls" id="controls"></div>
+      </article>
+
+      <article class="card wide">
+        <h2>引导场景</h2>
+        <div class="tabs" id="tabs"></div>
+        <div class="walkthrough" id="walkthrough"></div>
+      </article>
+
+      <article class="card wide">
+        <h2>报告契约</h2>
+        <p class="contract-note">报告是机器可比较的 JSON。路径、节目正文和凭据不进入报告；输入、配置和产物都用稳定指纹标识。</p>
+        <details open>
+          <summary>查看当前完整报告</summary>
+          <pre class="report" id="report"></pre>
+        </details>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const BenchmarkModel = (() => {
+      const stageDefinitions = [
+        { id: "prepare", label: "准备输入", provider: "local", elapsedMs: 220, costCny: 0 },
+        { id: "asr", label: "英文识别", provider: "qwen3-asr-flash", elapsedMs: 28000, costCny: 0.066 },
+        { id: "translate", label: "中文翻译", provider: "qwen-mt-turbo", elapsedMs: 12000, costCny: 0.012 },
+        { id: "tts", label: "中文语音", provider: "qwen3-tts-flash", elapsedMs: 40000, costCny: 0.118 },
+        { id: "finalize", label: "合成 MP3", provider: "local", elapsedMs: 3000, costCny: 0 }
+      ];
+
+      function makeStages() {
+        return stageDefinitions.map(stage => ({
+          ...stage,
+          status: "pending",
+          attempts: 0,
+          retries: 0,
+          elapsedMs: 0,
+          costCny: 0,
+          cacheHit: false,
+          artifactFingerprint: null,
+          errorCode: null
+        }));
+      }
+
+      function createState(cacheMode = "cold") {
+        return {
+          schemaVersion: "1.0",
+          runId: "bench-demo-001",
+          status: "draft",
+          cacheMode,
+          input: {
+            fingerprint: "sha256:fba898bc…01f",
+            durationMs: 300010,
+            language: "en"
+          },
+          profile: {
+            id: "alibaba-podcast-v1",
+            fingerprint: "sha256:profile-demo",
+            targetLanguage: "zh-CN",
+            region: "cn-beijing",
+            asr: "qwen3-asr-flash",
+            translation: "qwen-mt-turbo",
+            tts: "qwen3-tts-flash",
+            voice: "Chelsie"
+          },
+          stages: makeStages(),
+          qualityGate: { status: "pending", decidedAt: null, note: null },
+          output: null,
+          lastEvent: "尚未开始。",
+          lastActionAccepted: true
+        };
+      }
+
+      function clone(state) {
+        return JSON.parse(JSON.stringify(state));
+      }
+
+      function currentStage(state) {
+        return state.stages.find(stage => stage.status === "running");
+      }
+
+      function reject(state, message) {
+        const next = clone(state);
+        next.lastEvent = `拒绝操作：${message}`;
+        next.lastActionAccepted = false;
+        return next;
+      }
+
+      function advance(next) {
+        const pending = next.stages.find(stage => stage.status === "pending");
+        if (pending) {
+          pending.status = "running";
+          pending.attempts += 1;
+          next.status = "running";
+          next.lastEvent = `${pending.label}已开始。`;
+        } else {
+          next.status = "awaiting_review";
+          next.output = {
+            format: "mp3",
+            bitrateKbps: 64,
+            channels: 1,
+            durationMs: 286400,
+            fingerprint: "sha256:output-demo"
+          };
+          next.lastEvent = "生产完成，等待收听者验收。";
+        }
+      }
+
+      function settleStage(state, requestedId, result) {
+        const running = currentStage(state);
+        if (!running) return reject(state, "当前没有正在执行的阶段。");
+        if (requestedId && running.id !== requestedId) {
+          return reject(state, `${running.label}尚未完成，不能提前完成${stageDefinitions.find(s => s.id === requestedId)?.label || requestedId}。`);
+        }
+
+        const next = clone(state);
+        const stage = currentStage(next);
+        stage.status = result;
+        stage.cacheHit = result === "cached";
+        stage.elapsedMs += result === "cached" ? 30 : stageDefinitions.find(s => s.id === stage.id).elapsedMs;
+        stage.costCny += result === "cached" ? 0 : stageDefinitions.find(s => s.id === stage.id).costCny;
+        stage.artifactFingerprint = `sha256:${stage.id}-demo`;
+        next.lastActionAccepted = true;
+        advance(next);
+        return next;
+      }
+
+      function reduce(state, action) {
+        if (action.type === "RESET") return createState(action.cacheMode || "cold");
+
+        if (action.type === "START") {
+          if (state.status !== "draft") return reject(state, "只有草稿运行可以开始。");
+          const next = clone(state);
+          next.status = "running";
+          next.stages[0].status = "running";
+          next.stages[0].attempts = 1;
+          next.lastEvent = "生产运行已开始，正在准备输入。";
+          next.lastActionAccepted = true;
+          return next;
+        }
+
+        if (action.type === "SUCCEED") return settleStage(state, action.stageId, "succeeded");
+        if (action.type === "CACHE") return settleStage(state, action.stageId, "cached");
+
+        if (action.type === "FAIL") {
+          const running = currentStage(state);
+          if (!running) return reject(state, "当前没有可以失败的阶段。");
+          const next = clone(state);
+          const stage = currentStage(next);
+          stage.status = "failed";
+          stage.elapsedMs += 6000;
+          stage.errorCode = "provider_timeout";
+          next.status = "failed";
+          next.lastEvent = `${stage.label}暂时失败；之前完成的阶段保持可恢复。`;
+          next.lastActionAccepted = true;
+          return next;
+        }
+
+        if (action.type === "RETRY") {
+          if (state.status !== "failed") return reject(state, "只有失败的运行可以重试。");
+          const next = clone(state);
+          const failed = next.stages.find(stage => stage.status === "failed");
+          failed.status = "running";
+          failed.attempts += 1;
+          failed.retries += 1;
+          failed.errorCode = null;
+          next.status = "running";
+          next.lastEvent = `正在重试${failed.label}，不会重跑已完成阶段。`;
+          next.lastActionAccepted = true;
+          return next;
+        }
+
+        if (action.type === "QUALITY") {
+          if (state.status !== "awaiting_review") return reject(state, "必须先完成生产，才能记录听感验收。");
+          const next = clone(state);
+          next.qualityGate = {
+            status: action.accepted ? "accepted" : "rejected",
+            decidedAt: "listener-decision",
+            note: action.accepted ? "听感可接受" : "听感不可接受"
+          };
+          next.status = action.accepted ? "accepted" : "rejected";
+          next.lastEvent = action.accepted ? "收听者接受本次产物。" : "收听者拒绝本次产物；速度结果不能算有效优化。";
+          next.lastActionAccepted = true;
+          return next;
+        }
+
+        return reject(state, `未知操作 ${action.type}。`);
+      }
+
+      function totals(state) {
+        return state.stages.reduce((sum, stage) => ({
+          wallClockMs: sum.wallClockMs + stage.elapsedMs,
+          cloudCostCny: sum.cloudCostCny + stage.costCny,
+          retries: sum.retries + stage.retries,
+          cacheHits: sum.cacheHits + (stage.cacheHit ? 1 : 0)
+        }), { wallClockMs: 0, cloudCostCny: 0, retries: 0, cacheHits: 0 });
+      }
+
+      function report(state) {
+        return {
+          schema_version: state.schemaVersion,
+          run: {
+            id: state.runId,
+            status: state.status,
+            cache_mode: state.cacheMode
+          },
+          input: state.input,
+          profile: state.profile,
+          stages: state.stages.map(({ label, provider, ...stage }) => ({
+            name: stage.id,
+            provider,
+            status: stage.status,
+            attempts: stage.attempts,
+            retries: stage.retries,
+            elapsed_ms: stage.elapsedMs,
+            cloud_cost_cny: Number(stage.costCny.toFixed(4)),
+            cache_hit: stage.cacheHit,
+            artifact_fingerprint: stage.artifactFingerprint,
+            error_code: stage.errorCode
+          })),
+          totals: {
+            ...totals(state),
+            cloudCostCny: Number(totals(state).cloudCostCny.toFixed(4))
+          },
+          output: state.output,
+          listening_quality_gate: state.qualityGate,
+          privacy: {
+            contains_credentials: false,
+            contains_transcript: false,
+            contains_absolute_source_path: false
+          }
+        };
+      }
+
+      return { createState, reduce, totals, report, currentStage, stageDefinitions };
+    })();
+
+    const scenarios = [
+      {
+        id: "happy",
+        title: "冷启动成功",
+        description: "观察五个阶段依次完成、成本累加，最后仍需由你确认听感。",
+        steps: [
+          ["重置为冷启动", { type: "RESET", cacheMode: "cold" }],
+          ["开始生产", { type: "START" }],
+          ["输入准备完成", { type: "SUCCEED" }],
+          ["英文识别完成", { type: "SUCCEED" }],
+          ["中文翻译完成", { type: "SUCCEED" }],
+          ["中文语音完成", { type: "SUCCEED" }],
+          ["MP3 合成完成", { type: "SUCCEED" }],
+          ["接受听感", { type: "QUALITY", accepted: true }]
+        ]
+      },
+      {
+        id: "retry",
+        title: "云端超时恢复",
+        description: "英文识别第一次超时；重试只重跑失败阶段，准备输入不会丢失。",
+        steps: [
+          ["重置为冷启动", { type: "RESET", cacheMode: "cold" }],
+          ["开始生产", { type: "START" }],
+          ["输入准备完成", { type: "SUCCEED" }],
+          ["英文识别超时", { type: "FAIL" }],
+          ["重试失败阶段", { type: "RETRY" }],
+          ["英文识别完成", { type: "SUCCEED" }],
+          ["中文翻译完成", { type: "SUCCEED" }],
+          ["中文语音完成", { type: "SUCCEED" }],
+          ["MP3 合成完成", { type: "SUCCEED" }],
+          ["接受听感", { type: "QUALITY", accepted: true }]
+        ]
+      },
+      {
+        id: "resume",
+        title: "缓存恢复",
+        description: "相同输入和配置复用前三个阶段，只重新生成语音与最终 MP3。",
+        steps: [
+          ["重置为缓存恢复", { type: "RESET", cacheMode: "warm" }],
+          ["开始生产", { type: "START" }],
+          ["复用输入准备", { type: "CACHE" }],
+          ["复用英文识别", { type: "CACHE" }],
+          ["复用中文翻译", { type: "CACHE" }],
+          ["中文语音完成", { type: "SUCCEED" }],
+          ["MP3 合成完成", { type: "SUCCEED" }],
+          ["接受听感", { type: "QUALITY", accepted: true }]
+        ]
+      },
+      {
+        id: "illegal",
+        title: "阻止越级完成",
+        description: "在输入尚未准备好时尝试宣布 TTS 完成；状态机必须拒绝且不污染报告。",
+        steps: [
+          ["重置为冷启动", { type: "RESET", cacheMode: "cold" }],
+          ["开始生产", { type: "START" }],
+          ["错误地完成中文语音", { type: "SUCCEED", stageId: "tts" }],
+          ["正确完成输入准备", { type: "SUCCEED" }]
+        ]
+      }
+    ];
+
+    let state = BenchmarkModel.createState("cold");
+    let activeScenario = scenarios[0].id;
+    let scenarioStep = 0;
+
+    const labels = {
+      draft: "草稿", pending: "等待", running: "进行中", succeeded: "完成",
+      cached: "缓存命中", failed: "失败", awaiting_review: "等待验收",
+      accepted: "已接受", rejected: "已拒绝"
+    };
+
+    function formatMs(ms) {
+      return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;
+    }
+
+    function dispatch(action) {
+      state = BenchmarkModel.reduce(state, action);
+      render();
+    }
+
+    function render() {
+      const totals = BenchmarkModel.totals(state);
+      document.getElementById("runStatus").innerHTML = `<span class="status ${state.status}">${labels[state.status]}</span>`;
+      document.getElementById("summary").innerHTML = [
+        ["累计耗时", formatMs(totals.wallClockMs)],
+        ["云端费用", `¥${totals.cloudCostCny.toFixed(3)}`],
+        ["重试", totals.retries],
+        ["缓存命中", totals.cacheHits]
+      ].map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join("");
+
+      document.getElementById("stages").innerHTML = state.stages.map(stage => `
+        <div class="stage">
+          <strong>${stage.label}</strong>
+          <div><span class="status ${stage.status}">${labels[stage.status]}</span><div class="stage-meta">${stage.provider} · 尝试 ${stage.attempts} 次</div></div>
+          <div class="stage-numbers">${formatMs(stage.elapsedMs)} · ¥${stage.costCny.toFixed(3)}</div>
+        </div>
+      `).join("");
+
+      const event = document.getElementById("event");
+      event.className = `event${state.lastActionAccepted ? "" : " rejected-action"}`;
+      event.textContent = state.lastEvent;
+
+      document.getElementById("command").textContent = `uv run cli.py --task benchmark \\\n+  --name "output/benchmarks/english-podcast-5m.m4a" \\\n+  --benchmark-profile alibaba-podcast-v1 \\\n+  --cache-mode ${state.cacheMode} \\\n+  --report "output/benchmarks/reports/latest.json"`;
+
+      const running = BenchmarkModel.currentStage(state);
+      document.getElementById("controls").innerHTML = `
+        <button data-action="reset-cold">新建冷启动</button>
+        <button data-action="reset-warm">新建缓存恢复</button>
+        <button class="primary" data-action="start" ${state.status !== "draft" ? "disabled" : ""}>开始生产</button>
+        <button data-action="success" ${!running ? "disabled" : ""}>当前阶段成功</button>
+        <button data-action="cache" ${!running ? "disabled" : ""}>当前阶段命中缓存</button>
+        <button class="danger" data-action="fail" ${!running ? "disabled" : ""}>当前阶段超时</button>
+        <button data-action="retry" ${state.status !== "failed" ? "disabled" : ""}>重试失败阶段</button>
+        <button data-action="accept" ${state.status !== "awaiting_review" ? "disabled" : ""}>接受听感</button>
+        <button class="danger" data-action="reject" ${state.status !== "awaiting_review" ? "disabled" : ""}>拒绝听感</button>
+      `;
+
+      document.getElementById("controls").querySelectorAll("button").forEach(button => {
+        button.addEventListener("click", () => {
+          const actions = {
+            "reset-cold": { type: "RESET", cacheMode: "cold" },
+            "reset-warm": { type: "RESET", cacheMode: "warm" },
+            start: { type: "START" }, success: { type: "SUCCEED" }, cache: { type: "CACHE" },
+            fail: { type: "FAIL" }, retry: { type: "RETRY" },
+            accept: { type: "QUALITY", accepted: true }, reject: { type: "QUALITY", accepted: false }
+          };
+          dispatch(actions[button.dataset.action]);
+        });
+      });
+
+      renderWalkthrough();
+      document.getElementById("report").textContent = JSON.stringify(BenchmarkModel.report(state), null, 2);
+    }
+
+    function renderTabs() {
+      document.getElementById("tabs").innerHTML = scenarios.map(scenario => `
+        <button class="${scenario.id === activeScenario ? "active" : ""}" data-scenario="${scenario.id}">${scenario.title}</button>
+      `).join("");
+      document.getElementById("tabs").querySelectorAll("button").forEach(button => {
+        button.addEventListener("click", () => {
+          activeScenario = button.dataset.scenario;
+          scenarioStep = 0;
+          state = BenchmarkModel.createState("cold");
+          renderTabs();
+          render();
+        });
+      });
+    }
+
+    function renderWalkthrough() {
+      const scenario = scenarios.find(item => item.id === activeScenario);
+      document.getElementById("walkthrough").innerHTML = `
+        <h3>${scenario.title}</h3>
+        <p>${scenario.description}</p>
+        <div class="steps">
+          ${scenario.steps.map(([label], index) => `<button class="${index < scenarioStep ? "done" : ""}" data-step="${index}" ${index !== scenarioStep ? "disabled" : ""}>${index + 1}. ${label}</button>`).join("")}
+        </div>
+      `;
+      document.getElementById("walkthrough").querySelectorAll("button[data-step]").forEach(button => {
+        button.addEventListener("click", () => {
+          const index = Number(button.dataset.step);
+          const action = scenario.steps[index][1];
+          state = BenchmarkModel.reduce(state, action);
+          scenarioStep += 1;
+          render();
+        });
+      });
+    }
+
+    renderTabs();
+    render();
+  </script>
+</body>
+</html>
