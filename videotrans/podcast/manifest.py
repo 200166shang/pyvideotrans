@@ -26,7 +26,16 @@ STAGE_NAMES = ("prepare", "asr", "translate", "tts", "finalize")
 CHUNKED_STAGES = frozenset(("translate", "tts"))
 
 RUN_STATUSES = frozenset(
-    ("pending", "running", "interrupted", "needs_attention", "completed", "failed")
+    (
+        "pending",
+        "running",
+        "interrupted",
+        "needs_attention",
+        "awaiting_review",
+        "accepted",
+        "rejected",
+        "failed",
+    )
 )
 STAGE_STATUSES = frozenset(("pending", "in_flight", "completed", "failed"))
 CHUNK_STATUSES = frozenset(("pending", "in_flight", "committed", "failed"))
@@ -318,6 +327,32 @@ class PodcastManifest:
         self.run["active_stage"] = stage_name
         self._changed()
 
+    def define_chunks(self, stage_name: str, sources: Sequence[Any]) -> None:
+        """Define a chunked stage exactly once before any chunk is started.
+
+        Chunk source payloads contribute only to identities; the raw text is not
+        retained in the manifest. Repeating the same definition is idempotent,
+        which makes coordinator restart boundaries straightforward.
+        """
+
+        if stage_name not in CHUNKED_STAGES:
+            raise ManifestError("only translate and tts stages contain chunks")
+        stage = self.stage(stage_name)
+        proposed = [
+            _new_chunk(stage["identity"], index, source)
+            for index, source in enumerate(sources)
+        ]
+        if stage["chunks"]:
+            if [chunk["identity"] for chunk in stage["chunks"]] != [
+                chunk["identity"] for chunk in proposed
+            ]:
+                raise ManifestError("chunk identities cannot change after definition")
+            return
+        if stage["status"] != "pending":
+            raise ManifestError("chunks must be defined before their stage starts")
+        stage["chunks"] = proposed
+        self._changed()
+
     def fail_chunk(self, stage_name: str, chunk_id: str) -> None:
         chunk = self._chunk(stage_name, chunk_id)
         if chunk["status"] == "committed":
@@ -380,7 +415,7 @@ class PodcastManifest:
         stage["artifact"] = artifact
         stage["status"] = "completed"
         if name == "finalize":
-            self.run["status"] = "completed"
+            self.run["status"] = "awaiting_review"
             self.run["active_stage"] = None
         elif self.run["active_stage"] == name:
             self.run["active_stage"] = None
@@ -394,7 +429,7 @@ class PodcastManifest:
         not submitted again.
         """
 
-        terminal_run = self.run["status"] == "completed"
+        terminal_run = self.run["status"] in {"awaiting_review", "accepted", "rejected"}
         for name in STAGE_NAMES:
             stage = self.stage(name)
             for chunk in stage["chunks"]:

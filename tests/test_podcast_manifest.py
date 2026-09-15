@@ -19,6 +19,26 @@ from videotrans.podcast.manifest import (
 )
 
 
+def test_define_chunks_is_private_idempotent_and_immutable() -> None:
+    manifest = PodcastManifest.create(source={"fingerprint": "source"}, profile={"id": "v1"})
+
+    manifest.define_chunks("translate", [{"text_hash": "a"}, {"text_hash": "b"}])
+    first = [chunk["identity"] for chunk in manifest.stage("translate")["chunks"]]
+    manifest.define_chunks("translate", [{"text_hash": "a"}, {"text_hash": "b"}])
+
+    assert [chunk["identity"] for chunk in manifest.stage("translate")["chunks"]] == first
+    assert "text_hash" not in manifest.to_json()
+    with pytest.raises(ManifestError, match="cannot change"):
+        manifest.define_chunks("translate", [{"text_hash": "different"}])
+
+
+def test_finalize_moves_run_to_awaiting_review() -> None:
+    manifest = PodcastManifest.create(source={"fingerprint": "source"}, profile={"id": "v1"})
+    manifest.commit_stage("finalize", artifact_identity="sha256:" + "a" * 64)
+
+    assert manifest.run["status"] == "awaiting_review"
+
+
 def make_manifest():
     return PodcastManifest.create(
         source={"content_sha256": "source-fingerprint", "path": "/private/source.m4a"},

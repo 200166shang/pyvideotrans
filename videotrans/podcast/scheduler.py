@@ -72,6 +72,9 @@ def is_transient_error(error: BaseException) -> bool:
     explicit = getattr(error, "transient", None)
     if isinstance(explicit, bool):
         return explicit
+    retryable = getattr(error, "retryable", None)
+    if isinstance(retryable, bool):
+        return retryable
 
     status = _http_status(error)
     return status in (408, 429) or (status is not None and 500 <= status <= 599)

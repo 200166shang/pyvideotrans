@@ -586,7 +586,10 @@ def main() -> int:
             print("\nInterrupted.", file=sys.stderr)
             return 130
         except Exception as e:
-            print(tr('failed', type(e).__name__), file=sys.stderr)
+            safe_message = getattr(e, "safe_message", None)
+            if safe_message is None and e.__class__.__module__.startswith("videotrans.podcast"):
+                safe_message = str(e)
+            print(tr('failed', safe_message or type(e).__name__), file=sys.stderr)
             return 1
 
     # Build common params

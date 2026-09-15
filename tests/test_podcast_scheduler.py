@@ -11,6 +11,13 @@ from videotrans.podcast.scheduler import (
 )
 
 
+def test_retryable_attribute_is_honored() -> None:
+    class ProviderFailure(Exception):
+        retryable = True
+
+    assert is_transient_error(ProviderFailure())
+
+
 class FakeTime:
     def __init__(self):
         self.value = 0.0
