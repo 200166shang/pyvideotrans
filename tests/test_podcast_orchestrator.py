@@ -15,6 +15,7 @@ import pytest
 
 import videotrans.podcast.orchestrator as podcast_orchestrator
 from videotrans.podcast.alibaba_asr import (
+    AlibabaWholeFileAsrClient,
     AsrPollResult,
     AsrUsage,
     PollingPolicy,
@@ -28,7 +29,7 @@ from videotrans.podcast.alibaba_text import (
 )
 from videotrans.podcast.cli_runner import _record_review
 from videotrans.podcast.finalize import FinalizedAudio
-from videotrans.podcast.manifest import ManifestStore
+from videotrans.podcast.manifest import ManifestStore, PodcastManifest
 from videotrans.podcast.orchestrator import (
     PodcastCoordinator,
     PodcastPipelineError,
@@ -63,6 +64,63 @@ class FakeAsr:
             segments=(TranscriptSegment(0, 1000, self.text, "speaker-1", 0),),
             usage=AsrUsage(duration_seconds=1.0),
         )
+
+
+class FakeAsrClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    def sleep(self, seconds: float) -> None:
+        self.advance(seconds)
+
+
+class TimedAsr(FakeAsr):
+    def __init__(self, text: str, clock: FakeAsrClock) -> None:
+        super().__init__(text)
+        self.clock = clock
+        self.poll_events: list[tuple[float, AsrPollResult | BaseException]] = []
+
+    def submit(self, audio_url: str, *, language: str) -> SubmittedAsrTask:
+        self.clock.advance(0.25)
+        return super().submit(audio_url, language=language)
+
+    def poll(self, task_id: str) -> AsrPollResult:
+        self.poll_calls += 1
+        elapsed, event = self.poll_events.pop(0)
+        self.clock.advance(elapsed)
+        if isinstance(event, BaseException):
+            self.last_poll_diagnostics = {
+                "status_query_elapsed_ms": 150,
+                "status_query_count": 1,
+                "result_download_elapsed_ms": 0,
+                "result_download_count": 0,
+                "result_parse_elapsed_ms": 0,
+                "result_parse_count": 0,
+                "provider_queue_elapsed_ms": None,
+                "provider_task_elapsed_ms": None,
+            }
+            raise event
+        self.last_poll_diagnostics = {
+            "status_query_elapsed_ms": 100,
+            "status_query_count": 1,
+            "result_download_elapsed_ms": 200 if event.is_complete else 0,
+            "result_download_count": 1 if event.is_complete else 0,
+            "result_parse_elapsed_ms": 50 if event.is_complete else 0,
+            "result_parse_count": 1 if event.is_complete else 0,
+            "provider_queue_elapsed_ms": 1000 if event.is_complete else None,
+            "provider_task_elapsed_ms": 2500 if event.is_complete else None,
+        }
+        return event
+
+
+class RetryablePollFailure(RuntimeError):
+    retryable = True
 
 
 class FakeTranslator:
@@ -142,6 +200,172 @@ def make_coordinator(
     return PodcastCoordinator(runtime, profile), asr, translator, tts, finalizer
 
 
+def _asr_context(tmp_path):
+    source = tmp_path / "input.m4a"
+    source.write_bytes(b"audio")
+    run_directory = tmp_path / "run"
+    private_dir = run_directory / "private"
+    private_dir.mkdir(parents=True)
+    manifest = PodcastManifest.create(source={"fingerprint": "source"}, profile={})
+    store = ManifestStore(run_directory / "manifest.json")
+    store.save(manifest)
+    state = {"asr_submission_state": "not_started", "stage_elapsed_ms": {}}
+    (run_directory / "run.private.json").write_text(json.dumps(state), encoding="utf-8")
+    return source, private_dir, manifest, state, store, run_directory
+
+
+def _timed_coordinator(
+    asr: TimedAsr, clock: FakeAsrClock, upload_audio
+) -> PodcastCoordinator:
+    return PodcastCoordinator(
+        PodcastRuntime(
+            asr=asr,
+            translator=FakeTranslator(),
+            tts=FakeTts(),
+            upload_audio=upload_audio,
+            finalizer=FakeFinalizer(),
+        ),
+        ALIBABA_PODCAST_V2,
+        clock=clock,
+        sleeper=clock.sleep,
+    )
+
+
+def _succeeded_poll_result(text: str = "one") -> AsrPollResult:
+    return AsrPollResult(
+        "task-1",
+        "SUCCEEDED",
+        segments=(TranscriptSegment(0, 1000, text, "speaker-1", 0),),
+        usage=AsrUsage(duration_seconds=1.0),
+    )
+
+
+def test_asr_timing_records_upload_submit_inclusive_poll_and_poll_sleep(tmp_path) -> None:
+    clock = FakeAsrClock()
+    asr = TimedAsr("one", clock)
+    asr.polling_policy = PollingPolicy(initial_seconds=2, maximum_seconds=2)
+    asr.poll_events = [
+        (0.5, AsrPollResult("task-1", "RUNNING")),
+        (0.75, _succeeded_poll_result()),
+    ]
+    uploads = 0
+
+    def upload_audio(_: Path) -> str:
+        nonlocal uploads
+        uploads += 1
+        clock.advance(0.125)
+        return "oss://temporary/input.m4a"
+
+    coordinator = _timed_coordinator(asr, clock, upload_audio)
+    source, private_dir, manifest, state, store, run_directory = _asr_context(tmp_path)
+
+    coordinator._asr(source, private_dir, manifest, state, store, run_directory)
+
+    timing = state["asr_timing"]
+    assert uploads == 1
+    assert timing == {
+        "upload_elapsed_ms": 125,
+        "upload_count": 1,
+        "submit_elapsed_ms": 250,
+        "submit_count": 1,
+        "poll_inclusive_elapsed_ms": 1250,
+        "poll_inclusive_count": 2,
+        "status_query_elapsed_ms": 200,
+        "status_query_count": 2,
+        "result_download_elapsed_ms": 200,
+        "result_download_count": 1,
+        "result_parse_elapsed_ms": 50,
+        "result_parse_count": 1,
+        "poll_sleep_elapsed_ms": 2000,
+        "poll_sleep_count": 1,
+        "poll_retry_sleep_elapsed_ms": 0,
+        "poll_retry_sleep_count": 0,
+        "provider_queue_elapsed_ms": 1000,
+        "provider_task_elapsed_ms": 2500,
+    }
+    assert all(isinstance(value, int) for value in timing.values())
+    assert json.loads((run_directory / "run.private.json").read_text(encoding="utf-8"))["asr_timing"] == timing
+
+    saved_state = (run_directory / "run.private.json").read_bytes()
+    coordinator._asr(source, private_dir, manifest, state, store, run_directory)
+    assert (run_directory / "run.private.json").read_bytes() == saved_state
+    assert asr.poll_calls == 2
+
+
+def test_asr_timing_records_failed_submit(tmp_path) -> None:
+    clock = FakeAsrClock()
+    asr = TimedAsr("one", clock)
+    asr.submit_failure = ValueError("submit failed")
+
+    def upload_audio(_: Path) -> str:
+        clock.advance(0.125)
+        return "oss://temporary/input.m4a"
+
+    coordinator = _timed_coordinator(asr, clock, upload_audio)
+    source, private_dir, manifest, state, store, run_directory = _asr_context(tmp_path)
+
+    with pytest.raises(ValueError, match="submit failed"):
+        coordinator._asr(source, private_dir, manifest, state, store, run_directory)
+
+    assert state["asr_timing"]["upload_elapsed_ms"] == 125
+    assert state["asr_timing"]["submit_elapsed_ms"] == 250
+    assert state["asr_timing"]["submit_count"] == 1
+    assert state["asr_submission_state"] == "in_flight"
+    saved_state = json.loads(
+        (run_directory / "run.private.json").read_text(encoding="utf-8")
+    )
+    assert saved_state["asr_timing"] == state["asr_timing"]
+    assert saved_state["asr_submission_state"] == "in_flight"
+
+
+def test_asr_wait_timing_records_failed_poll_and_retry_sleep(tmp_path) -> None:
+    clock = FakeAsrClock()
+    asr = TimedAsr("one", clock)
+    asr.poll_events = [
+        (0.15, RetryablePollFailure("temporary")),
+        (0.2, _succeeded_poll_result()),
+    ]
+    coordinator = _timed_coordinator(asr, clock, lambda _: "unused")
+    _, _, _, state, _, run_directory = _asr_context(tmp_path)
+
+    coordinator._wait_for_asr("task-1", state, run_directory)
+
+    timing = state["asr_timing"]
+    assert timing["poll_inclusive_elapsed_ms"] == 350
+    assert timing["poll_inclusive_count"] == 2
+    assert timing["status_query_elapsed_ms"] == 250
+    assert timing["status_query_count"] == 2
+    assert timing["poll_retry_sleep_elapsed_ms"] == 1000
+    assert timing["poll_retry_sleep_count"] == 1
+    assert state["asr_poll_retries"] == 1
+
+
+def test_asr_resume_with_recorded_task_skips_upload_and_submit_timing(tmp_path) -> None:
+    clock = FakeAsrClock()
+    asr = TimedAsr("one", clock)
+    asr.poll_events = [(0.2, _succeeded_poll_result())]
+    uploads = 0
+
+    def upload_audio(_: Path) -> str:
+        nonlocal uploads
+        uploads += 1
+        return "oss://temporary/input.m4a"
+
+    coordinator = _timed_coordinator(asr, clock, upload_audio)
+    source, private_dir, manifest, state, store, run_directory = _asr_context(tmp_path)
+    manifest.set_asr_task_id("task-1")
+    store.save(manifest)
+
+    coordinator._asr(source, private_dir, manifest, state, store, run_directory)
+
+    timing = state["asr_timing"]
+    assert uploads == 0
+    assert asr.submit_calls == 0
+    assert timing["upload_count"] == 0
+    assert timing["submit_count"] == 0
+    assert timing["poll_inclusive_count"] == 1
+
+
 @pytest.fixture(autouse=True)
 def fake_prepare_audio(monkeypatch):
     def prepare(source: Path, destination: Path) -> Path:
@@ -184,6 +408,51 @@ def test_full_run_writes_mp3_manifest_and_privacy_safe_report(
     serialized = result.report_path.read_text(encoding="utf-8")
     assert str(source) not in serialized
     assert "A short episode" not in serialized
+
+
+def test_full_run_persists_real_client_poll_diagnostics(tmp_path, monkeypatch) -> None:
+    clock = FakeAsrClock()
+
+    class Transport:
+        def submit(self, payload):
+            return {"output": {"task_id": "task-1", "task_status": "PENDING"}}
+
+        def poll(self, task_id):
+            clock.advance(0.2)
+            return {"output": {
+                "task_id": task_id,
+                "task_status": "SUCCEEDED",
+                "submit_time": "2026-09-15 10:00:00.000",
+                "scheduled_time": "2026-09-15 10:00:01.000",
+                "end_time": "2026-09-15 10:00:03.500",
+                "results": [{"subtask_status": "SUCCEEDED",
+                             "transcription_url": "https://private.invalid/signed"}],
+            }}
+
+        def download_result(self, url):
+            clock.advance(0.3)
+            return {"transcripts": [{"sentences": [
+                {"begin_time": 0, "end_time": 1000, "text": "A short episode."}
+            ]}]}
+
+    source = tmp_path / "source.m4a"
+    source.write_bytes(b"authorized input")
+    monkeypatch.setattr(podcast_orchestrator, "probe_duration_ms", lambda _: 1000)
+    coordinator, *_ = make_coordinator("A short episode.")
+    coordinator.runtime = replace(
+        coordinator.runtime, asr=AlibabaWholeFileAsrClient(Transport(), clock=clock)
+    )
+    result = coordinator.create(source, tmp_path / "run")
+    state = json.loads((result.run_directory / "run.private.json").read_text())
+    timing = state["asr_timing"]
+    assert timing["status_query_elapsed_ms"] == 200
+    assert timing["result_download_elapsed_ms"] == 300
+    assert timing["result_parse_count"] == 1
+    assert timing["provider_queue_elapsed_ms"] == 1000
+    assert timing["provider_task_elapsed_ms"] == 2500
+    assert "signed" not in json.dumps(timing)
+    assert "A short episode" not in json.dumps(timing)
+    assert "asr_timing" not in result.report_path.read_text()
 
 
 def test_tts_starts_before_later_translation_finishes(tmp_path, monkeypatch) -> None:
