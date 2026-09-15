@@ -23,7 +23,6 @@ from videotrans.podcast.orchestrator import PodcastCoordinator, PodcastRuntime
 from videotrans.podcast.profiles import ALIBABA_PODCAST_V2
 from videotrans.podcast.trace import PerformanceTrace, read_performance_trace
 
-
 ResultT = TypeVar("ResultT")
 
 
@@ -42,8 +41,12 @@ class _ScheduledChunk:
     finish_seconds: float
 
 
-class _VirtualClock:
-    """Monotonic clock that advances only to the next awaited deadline."""
+class VirtualClock:
+    """Shared offline replay clock, advancing only to awaited deadlines.
+
+    Used by both the coordinator replay and trace-based throughput comparison.
+    It performs no wall-clock sleeping or provider work.
+    """
 
     def __init__(self) -> None:
         self._now = 0.0
@@ -138,7 +141,7 @@ _TTS = _StageConfiguration(
 
 def _new_scheduler(
     configuration: _StageConfiguration,
-    clock: _VirtualClock,
+    clock: VirtualClock,
 ) -> production_scheduler.AsyncScheduler[int, int]:
     return production_scheduler.AsyncScheduler(
         concurrency=configuration.concurrency,
@@ -158,7 +161,7 @@ async def _replay_stage(
     if service_latency_seconds < 0:
         raise ValueError("service_latency_seconds cannot be negative")
 
-    clock = _VirtualClock()
+    clock = VirtualClock()
     scheduler = _new_scheduler(configuration, clock)
     starts = [0.0] * configuration.chunk_count
     finishes = [0.0] * configuration.chunk_count
@@ -218,7 +221,7 @@ async def _replay_overlap(
 ) -> tuple[tuple[_ScheduledChunk, ...], tuple[_ScheduledChunk, ...]]:
     """Drive the actual production overlap coordinator with virtual providers."""
 
-    clock = _VirtualClock()
+    clock = VirtualClock()
 
     class ReplayCoordinator(PodcastCoordinator):
         async def _call_translation(self, text: str) -> TranslationResult:

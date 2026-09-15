@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from videotrans.podcast.replay import _VirtualClock
+from videotrans.podcast.replay import VirtualClock
 from videotrans.podcast.scheduler import AsyncScheduler
 from videotrans.podcast.trace import TraceError, read_performance_trace
 
@@ -258,6 +258,12 @@ def _read_trace_input(path: Path, expected_rpm: float) -> _TraceInput:
         if dependency[0] not in translation_ids or dependency[1] not in translation_ids:
             raise TraceError("TTS dependency refers to a missing translation chunk")
         release_ns = queued["monotonic_ns"]
+        prefix_committed_ns = max(
+            translation_by_event["commit"][index]["monotonic_ns"]
+            for index in range(dependency[1] + 1)
+        )
+        if release_ns < prefix_committed_ns:
+            raise TraceError("TTS release precedes its committed translation prefix")
         start_ns = started["monotonic_ns"]
         commit_ns = committed["monotonic_ns"]
         if not release_ns <= start_ns <= commit_ns:
@@ -338,7 +344,7 @@ async def _replay(
     requests_per_minute: float,
     latency_multiplier: float,
 ) -> tuple[_ReplayChunk, ...]:
-    clock = _VirtualClock()
+    clock = VirtualClock()
     scheduler: AsyncScheduler[int, int] = AsyncScheduler(
         concurrency=concurrency,
         requests_per_minute=requests_per_minute,

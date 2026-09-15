@@ -293,3 +293,24 @@ def test_module_cli_prints_json_without_echoing_the_trace_path(
     output = capsys.readouterr().out
     assert json.loads(output)["observations"]["chunk_count"] == 1
     assert str(path) not in output
+
+
+@pytest.mark.parametrize("delayed_translation", [0, 1])
+def test_rejects_tts_release_before_any_required_prefix_commit(
+    tmp_path: Path, delayed_translation: int
+):
+    events = _trace_events(((1.0, 1.4, 2.0), (1.0, 1.8, 2.4)))
+    # A direct dependency and an earlier out-of-order prefix dependency
+    # must both have committed before release, even if their IDs exist.
+    for event in events:
+        if event.get("stage_id") == "tts":
+            event["dependency_range"] = [1, 1]
+        if (
+            event.get("stage_id") == "translate"
+            and event.get("chunk_id") == delayed_translation
+            and event["event"] == "commit"
+        ):
+            event["monotonic_ns"] = 1_100_000_000
+    events.sort(key=lambda event: int(event["monotonic_ns"]))
+    with pytest.raises(TraceError, match="committed translation prefix"):
+        replay_tts_concurrency(_write_trace(tmp_path / "invalid.jsonl", events))
