@@ -69,3 +69,7 @@ Candidate `tts-throughput-20260915-165255`, code commit `f16acd6`, completed onc
 Before the paid run, the full podcast suite passed **193 tests**. Review fixes then passed **18 targeted replay tests** (including new dependency-time regression coverage). Changed Python files pass Ruff and compilation; full-directory Ruff identified 11 existing base-revision findings, one import-order finding was removed while touching the shared replay module, leaving unrelated legacy findings outside this scope.
 
 Standards review found missing dependency-prefix timing validation and a private clock coupling. The implementation now rejects TTS releases before their translation prefix has committed and exposes the shared `VirtualClock`; both changes were reverified. Spec review checked the opt-in profile delta, historical timing threshold, one-run limit and pending listener gate. No unresolved blocking finding remains for this experimental slice.
+
+## Release completion after listener acceptance
+
+The listener accepted the audio on 2026-09-15 and asked to complete the workflow. Manifest, production report and benchmark summary now record **accepted**, without a cloud client or extra paid run. The throughput profile is promoted to the new-run CLI default with its measured fingerprint preserved. Resume/review without an explicit profile uses the saved profile, retaining v2 recovery compatibility. Single-sample and no-long-programme evidence limitations remain unchanged.

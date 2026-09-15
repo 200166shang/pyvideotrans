@@ -56,13 +56,15 @@ ALIBABA_PODCAST_V2 = PodcastProfile(
 )
 
 
-# Explicit opt-in experiment; the CLI default remains the accepted v2 profile.
+# Listener-accepted throughput profile; v2 remains available for existing runs.
 ALIBABA_PODCAST_TTS_THROUGHPUT = replace(
     ALIBABA_PODCAST_V2,
     id="alibaba-podcast-tts-throughput",
     tts_concurrency=8,
     tts_soft_char_limit=250,
 )
+
+DEFAULT_PODCAST_PROFILE = ALIBABA_PODCAST_TTS_THROUGHPUT
 
 _PROFILES = {
     profile.id: profile

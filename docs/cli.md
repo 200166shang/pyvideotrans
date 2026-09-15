@@ -686,3 +686,24 @@ uv run cli.py --task vtv --name "60.mp4" --source_language_code zh-cn --target_l
 - [配音渠道说明](https://pyvideotrans.com/peiyinqudao)
 - [常见问题 FAQ](https://pyvideotrans.com/faq)
 - [技术架构](https://pyvideotrans.com/yuanli)
+
+
+## 中文听力版播客
+
+将已授权的本地英文节目制作成普通话 MP3：
+
+```sh
+python cli.py --task podcast --name "/absolute/path/episode.m4a" --output-dir "/absolute/path/episode-zh"
+```
+
+新任务默认使用已试听验收的 `alibaba-podcast-tts-throughput`：Andre 音色、250 字句子优先分块、TTS 并发 8、均匀 150 RPM，输出 48 kHz 单声道 64 kbps MP3。沿用现有阿里云凭据配置。指定的输出目录须为空。
+
+中断后使用原目录恢复；省略配置参数时会读取该任务保存的配置，旧 v2 任务也适用：
+
+```sh
+python cli.py --task podcast --resume "/absolute/path/episode-zh"
+```
+
+需要原配置时显式指定 `--podcast-profile alibaba-podcast-v2`。恢复任务时显式指定的配置必须与该任务匹配。
+
+本轮五分钟样本耗时 38.471 秒，比历史 52.009 秒缩短 26.03%，已通过听感验收。这是单次样本证据，尚未验证长节目性能。详见 [实验与验收记录](research/podcast-tts-throughput.md)。

@@ -23,3 +23,9 @@ Replay tests cover calibration, queueing headroom/no-headroom, latency sensitivi
 Offline unchanged-chunk concurrency 6/8 yields only 9.8847%, below the gate. The authorized fallback selects `alibaba-podcast-tts-throughput`: TTS concurrency 8 and sentence-first soft ceiling 250, keeping 150 RPM and all other v2 provider/output/recovery settings. It is explicit opt-in; CLI default remains `alibaba-podcast-v2`.
 
 The chunking sweep preserves exact ordered non-whitespace characters and speaker ownership, and requires incremental/batch oracle equality. It allocates each original observed TTS service interval across the corresponding characters, with 0.5/1/2-second fixed request overhead and 1.0/1.1/1.2 service-latency multipliers. New per-chunk latencies are not observed evidence; the 38.500–41.562-second prediction is a scenario range, not a confidence interval or promise. Only the single cold candidate can test this hypothesis.
+
+## Listener acceptance and release completion
+
+On 2026-09-15 the listener explicitly accepted the listening result and requested completion. This supersedes the experimental default/pending-review statements above: the accepted throughput profile becomes the default for **new** podcast and benchmark runs. Its ID and fingerprint remain unchanged from the measured candidate. Explicit `--podcast-profile alibaba-podcast-v2` remains available; when `--resume` or review omits the profile, the CLI selects the profile saved in `run.private.json`. Missing/unknown saved profiles fail rather than silently selecting the new default, and the existing fingerprint checks remain authoritative.
+
+Record accepted review in the manifest, production report and benchmark summary without constructing cloud clients; update the PR for the final release behavior, merge after verification, and close #14. The one-run evidence limit remains: no new paid, confirmation or long-programme run is requested or required to finish this accepted release.

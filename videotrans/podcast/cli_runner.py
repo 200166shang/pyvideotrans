@@ -18,7 +18,7 @@ from .orchestrator import (
     _resolve_report_destination,
     load_terminal_run,
 )
-from .profiles import PodcastProfile, get_profile
+from .profiles import DEFAULT_PODCAST_PROFILE, PodcastProfile, get_profile
 from .providers import create_alibaba_podcast_providers
 from .report import fingerprint_file, validate_report, write_report
 
@@ -50,7 +50,7 @@ def run_from_args(
 ) -> int:
     """Execute podcast or benchmark mode and print only safe local paths."""
 
-    profile = get_profile(args.podcast_profile)
+    profile = _select_profile(args.podcast_profile, args.resume)
     if args.task == "benchmark" and args.resume:
         _validate_benchmark_run(Path(args.resume))
 
@@ -114,6 +114,25 @@ def run_from_args(
     print(f"Production report: {result.report_path}")
     print(f"Status: {result.status}")
     return 0
+
+
+def _select_profile(profile_id: str | None, resume: str | None) -> PodcastProfile:
+    if profile_id is not None:
+        return get_profile(profile_id)
+    if not resume:
+        return DEFAULT_PODCAST_PROFILE
+    try:
+        state = json.loads(
+            (Path(resume) / "run.private.json").read_text(encoding="utf-8")
+        )
+        saved_id = state["profile_id"]
+        if not isinstance(saved_id, str):
+            raise TypeError("invalid profile")
+        return get_profile(saved_id)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise PodcastPipelineError(
+            "profile_mismatch", "Saved run is missing a valid production profile"
+        ) from error
 
 
 def _write_benchmark_summary(result: PodcastRunResult) -> Path:
