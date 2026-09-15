@@ -20,20 +20,26 @@ from videotrans.podcast.manifest import (
 
 
 def test_define_chunks_is_private_idempotent_and_immutable() -> None:
-    manifest = PodcastManifest.create(source={"fingerprint": "source"}, profile={"id": "v1"})
+    manifest = PodcastManifest.create(
+        source={"fingerprint": "source"}, profile={"id": "v1"}
+    )
 
     manifest.define_chunks("translate", [{"text_hash": "a"}, {"text_hash": "b"}])
     first = [chunk["identity"] for chunk in manifest.stage("translate")["chunks"]]
     manifest.define_chunks("translate", [{"text_hash": "a"}, {"text_hash": "b"}])
 
-    assert [chunk["identity"] for chunk in manifest.stage("translate")["chunks"]] == first
+    assert [
+        chunk["identity"] for chunk in manifest.stage("translate")["chunks"]
+    ] == first
     assert "text_hash" not in manifest.to_json()
     with pytest.raises(ManifestError, match="cannot change"):
         manifest.define_chunks("translate", [{"text_hash": "different"}])
 
 
 def test_finalize_moves_run_to_awaiting_review() -> None:
-    manifest = PodcastManifest.create(source={"fingerprint": "source"}, profile={"id": "v1"})
+    manifest = PodcastManifest.create(
+        source={"fingerprint": "source"}, profile={"id": "v1"}
+    )
     manifest.commit_stage("finalize", artifact_identity="sha256:" + "a" * 64)
 
     assert manifest.run["status"] == "awaiting_review"
@@ -75,7 +81,9 @@ def test_create_has_versioned_run_and_ordered_five_stage_state():
     assert manifest.run["status"] == "pending"
     assert tuple(manifest.stages) == STAGE_NAMES
     assert all(stage["status"] == "pending" for stage in manifest.stages.values())
-    assert all(chunk["status"] == "pending" for chunk in manifest.stage("tts")["chunks"])
+    assert all(
+        chunk["status"] == "pending" for chunk in manifest.stage("tts")["chunks"]
+    )
     assert manifest.stage("asr")["task_id"] is None
 
 
@@ -116,7 +124,7 @@ def test_atomic_store_round_trip_and_replace_leaves_no_temp_file(tmp_path):
     loaded = store.load()
 
     assert loaded.to_dict() == first.to_dict()
-    assert json.loads(path.read_text(encoding="utf-8"))["manifest_version"] == 1
+    assert json.loads(path.read_text(encoding="utf-8"))["manifest_version"] == 2
     assert not list(path.parent.glob(".manifest.json.*.tmp"))
 
 
@@ -141,7 +149,7 @@ def test_atomic_write_fsyncs_file_before_replace(tmp_path, monkeypatch):
     assert events[-1] == "fsync"  # parent directory durability
 
 
-def test_resume_requeues_only_in_flight_chunks_and_preserves_commits(tmp_path):
+def test_resume_preserves_uncertain_chunks_and_commits(tmp_path):
     store = ManifestStore(tmp_path / "manifest.json")
     manifest = make_manifest()
     translate_chunks = manifest.stage("translate")["chunks"]
@@ -164,10 +172,11 @@ def test_resume_requeues_only_in_flight_chunks_and_preserves_commits(tmp_path):
 
     assert chunks[0] == committed_before
     assert chunks[0]["status"] == "committed"
-    assert chunks[1]["status"] == "pending"
+    assert chunks[1]["status"] == "submission_uncertain"
+    assert chunks[1]["attempt_identity"].startswith("sha256:")
     assert chunks[1]["artifact"] is None
-    assert resumed.stage("translate")["status"] == "pending"
-    assert resumed.run["status"] == "interrupted"
+    assert resumed.stage("translate")["status"] == "failed"
+    assert resumed.run["status"] == "needs_attention"
     assert resumed.run["resume_count"] == 1
     assert ManifestStore(store.path).load().to_dict() == resumed.to_dict()
 
@@ -183,12 +192,59 @@ def test_resume_preserves_asr_task_id_for_polling(tmp_path):
 
     assert resumed.stage("asr")["task_id"] == "provider-task-123"
     assert resumed.stage("asr")["status"] == "in_flight"
-    assert resumed.run["active_stage"] == "asr"
+    assert resumed.run["active_stages"] == ["asr"]
+
+
+def test_dynamic_tts_plan_is_append_only_and_completes_only_after_seal():
+    manifest = PodcastManifest.create(source="source", profile={"id": "v2"})
+    first = manifest.append_chunk("tts", {"text_hash": "a"})
+    manifest.start_chunk("tts", first["identity"])
+    manifest.commit_chunk(
+        "tts", first["identity"], artifact_identity=artifact_id("tts-a")
+    )
+
+    assert manifest.stage("tts")["status"] == "in_flight"
+    assert manifest.stage("tts")["plan_status"] == "open"
+
+    manifest.seal_chunks("tts")
+    assert manifest.stage("tts")["status"] == "in_flight"
+    manifest.commit_stage("tts", artifact_identity=artifact_id("tts-stage"))
+    assert manifest.stage("tts")["status"] == "completed"
+
+    with pytest.raises(ManifestError, match="open plan"):
+        manifest.append_chunk("tts", {"text_hash": "b"})
+
+
+def test_multiple_pipeline_stages_can_be_active():
+    manifest = PodcastManifest.create(source="source", profile={"id": "v2"})
+
+    manifest.start_stage("tts")
+    manifest.start_stage("translate")
+
+    assert manifest.run["active_stages"] == ["translate", "tts"]
+
+
+def test_explicit_no_success_response_allows_new_attempt_identity():
+    manifest = PodcastManifest.create(
+        source="source",
+        profile={"id": "v2"},
+        chunk_sources={"translate": [{"text_hash": "a"}]},
+    )
+    item = manifest.stage("translate")["chunks"][0]
+
+    first_attempt = manifest.start_chunk("translate", item["identity"])
+    manifest.retry_chunk("translate", item["identity"])
+    second_attempt = manifest.start_chunk("translate", item["identity"])
+
+    assert first_attempt != second_attempt
+    assert item["attempts"] == 2
+    assert item["retries"] == 1
 
 
 def test_committed_artifacts_are_immutable():
     manifest = make_manifest()
     chunk = manifest.stage("tts")["chunks"][0]
+    manifest.start_chunk("tts", chunk["identity"])
     manifest.commit_chunk(
         "tts",
         chunk["identity"],
@@ -212,7 +268,36 @@ def test_committed_artifacts_are_immutable():
         )
 
 
-@pytest.mark.parametrize("path", ["/tmp/result.wav", "../result.wav", "safe/../../result.wav"])
+def test_chunk_transitions_require_durable_pre_send_marker():
+    manifest = make_manifest()
+    chunk = manifest.stage("tts")["chunks"][0]
+
+    with pytest.raises(ManifestError, match="uncertain submission can commit"):
+        manifest.commit_chunk(
+            "tts", chunk["identity"], artifact_identity=artifact_id("voice-0")
+        )
+    with pytest.raises(ManifestError, match="uncertain submission can fail"):
+        manifest.fail_chunk("tts", chunk["identity"])
+
+    manifest.start_chunk("tts", chunk["identity"])
+    with pytest.raises(ManifestError, match="pending chunk can start"):
+        manifest.start_chunk("tts", chunk["identity"])
+
+
+def test_manifest_rejects_forged_attempt_identity():
+    manifest = make_manifest()
+    chunk = manifest.stage("tts")["chunks"][0]
+    manifest.start_chunk("tts", chunk["identity"])
+    data = manifest.to_dict()
+    data["stages"]["tts"]["chunks"][0]["attempt_identity"] = artifact_id("forged")
+
+    with pytest.raises(ManifestError, match="attempt identity is invalid"):
+        PodcastManifest.from_dict(data)
+
+
+@pytest.mark.parametrize(
+    "path", ["/tmp/result.wav", "../result.wav", "safe/../../result.wav"]
+)
 def test_artifacts_cannot_escape_run_directory(path):
     manifest = make_manifest()
 

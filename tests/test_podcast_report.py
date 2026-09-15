@@ -42,7 +42,9 @@ def _stages():
         stages.append(
             make_stage(
                 name,
-                provider="local" if name in {"prepare", "finalize"} else f"provider-{name}",
+                provider="local"
+                if name in {"prepare", "finalize"}
+                else f"provider-{name}",
                 status="succeeded",
                 attempts=1,
                 retries=0,
@@ -200,7 +202,11 @@ def test_rejects_unsafe_fields(container, unsafe_key, unsafe_value):
 
 @pytest.mark.parametrize(
     "unsafe_value",
-    ["/Users/person/private/source.m4a", "file:///tmp/source.m4a", r"C:\\private\\source.m4a"],
+    [
+        "/Users/person/private/source.m4a",
+        "file:///tmp/source.m4a",
+        r"C:\\private\\source.m4a",
+    ],
 )
 def test_rejects_absolute_paths_in_any_string_value(unsafe_value):
     report = _report()
@@ -224,7 +230,9 @@ def test_fingerprints_are_stable_and_profile_excludes_its_fingerprint(tmp_path):
 
     assert fingerprint_file(source) == fingerprint_bytes(b"same bytes")
     first = fingerprint_profile({"id": "p", "voice": "Andre"})
-    second = fingerprint_profile({"voice": "Andre", "id": "p", "fingerprint": "ignored"})
+    second = fingerprint_profile(
+        {"voice": "Andre", "id": "p", "fingerprint": "ignored"}
+    )
     assert first == second
     assert first.startswith("sha256:")
 
@@ -253,6 +261,7 @@ def test_calculate_totals_aggregates_stage_values_not_chunk_values_twice():
 
     assert totals == {
         "wall_clock_ms": 4_321,
+        "timing_basis": "wall-clock",
         "cost_confirmed_cny": 0.02,
         "cost_unconfirmed_cny": 0.03,
         "retries": 0,

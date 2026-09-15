@@ -72,6 +72,7 @@ _CHUNK_KEYS = {
 }
 _TOTAL_KEYS = {
     "wall_clock_ms",
+    "timing_basis",
     "cost_confirmed_cny",
     "cost_unconfirmed_cny",
     "retries",
@@ -147,7 +148,11 @@ def fingerprint_file(
 ) -> str:
     """Stream a file into a SHA-256 fingerprint without retaining its path."""
 
-    if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size <= 0:
+    if (
+        isinstance(block_size, bool)
+        or not isinstance(block_size, int)
+        or block_size <= 0
+    ):
         raise ValueError("block_size must be a positive integer")
     digest = hashlib.sha256()
     with Path(path).open("rb") as source:
@@ -161,7 +166,9 @@ def fingerprint_profile(profile: Mapping[str, Any]) -> str:
 
     if not isinstance(profile, Mapping):
         raise TypeError("profile must be a mapping")
-    safe_profile = {key: value for key, value in profile.items() if key != "fingerprint"}
+    safe_profile = {
+        key: value for key, value in profile.items() if key != "fingerprint"
+    }
     _validate_privacy(safe_profile)
     try:
         canonical = json.dumps(
@@ -209,7 +216,9 @@ def public_list_price_total(
                 raise ValueError(
                     f"price[{metric!r}] must contain price_cny and optional per_units"
                 )
-            price = _decimal_number(price_spec["price_cny"], f"price[{metric!r}].price_cny")
+            price = _decimal_number(
+                price_spec["price_cny"], f"price[{metric!r}].price_cny"
+            )
             per_units = _decimal_number(
                 price_spec.get("per_units", 1), f"price[{metric!r}].per_units"
             )
@@ -248,7 +257,9 @@ def make_chunk(
         "elapsed_ms": elapsed_ms,
         "cache_hit": cache_hit,
         "cost_confirmed_cny": _json_number(cost_confirmed_cny, "cost_confirmed_cny"),
-        "cost_unconfirmed_cny": _json_number(cost_unconfirmed_cny, "cost_unconfirmed_cny"),
+        "cost_unconfirmed_cny": _json_number(
+            cost_unconfirmed_cny, "cost_unconfirmed_cny"
+        ),
         "artifact_fingerprint": artifact_fingerprint,
         "error_code": error_code,
     }
@@ -282,7 +293,9 @@ def make_stage(
         "elapsed_ms": elapsed_ms,
         "cache_hit": cache_hit,
         "cost_confirmed_cny": _json_number(cost_confirmed_cny, "cost_confirmed_cny"),
-        "cost_unconfirmed_cny": _json_number(cost_unconfirmed_cny, "cost_unconfirmed_cny"),
+        "cost_unconfirmed_cny": _json_number(
+            cost_unconfirmed_cny, "cost_unconfirmed_cny"
+        ),
         "chunks": [deepcopy(dict(chunk)) for chunk in chunks],
         "artifact_fingerprint": artifact_fingerprint,
         "error_code": error_code,
@@ -292,8 +305,11 @@ def make_stage(
 
 
 def calculate_totals(
-    stages: Sequence[Mapping[str, Any]], *, wall_clock_ms: int | None = None
-) -> dict[str, int | float]:
+    stages: Sequence[Mapping[str, Any]],
+    *,
+    wall_clock_ms: int | None = None,
+    timing_basis: str = "wall-clock",
+) -> dict[str, int | float | str]:
     """Aggregate stage-level totals without counting child chunks twice."""
 
     if isinstance(stages, (str, bytes)) or not isinstance(stages, Sequence):
@@ -304,6 +320,8 @@ def calculate_totals(
     if wall_clock_ms is None:
         wall_clock_ms = sum(stage["elapsed_ms"] for stage in stages)
     _non_negative_int(wall_clock_ms, "wall_clock_ms")
+    if timing_basis not in {"wall-clock", "active-process"}:
+        raise ValueError("timing_basis must be wall-clock or active-process")
     confirmed = sum(
         (_decimal_number(stage["cost_confirmed_cny"], "cost") for stage in stages),
         Decimal(0),
@@ -314,6 +332,7 @@ def calculate_totals(
     )
     return {
         "wall_clock_ms": wall_clock_ms,
+        "timing_basis": timing_basis,
         "cost_confirmed_cny": float(confirmed),
         "cost_unconfirmed_cny": float(unconfirmed),
         "retries": sum(stage["retries"] for stage in stages),
@@ -334,14 +353,15 @@ def build_report(
     output: Mapping[str, Any] | None = None,
     listening_quality_gate: Mapping[str, Any] | None = None,
     wall_clock_ms: int | None = None,
+    timing_basis: str = "wall-clock",
     schema_version: str = SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Build the complete report contract and reject unsafe data."""
 
     profile_copy = deepcopy(dict(profile))
-    profile_copy["fingerprint"] = profile_copy.get("fingerprint") or fingerprint_profile(
-        profile_copy
-    )
+    profile_copy["fingerprint"] = profile_copy.get(
+        "fingerprint"
+    ) or fingerprint_profile(profile_copy)
     stage_copies = [deepcopy(dict(stage)) for stage in stages]
     quality = deepcopy(
         dict(
@@ -359,7 +379,11 @@ def build_report(
         },
         "profile": profile_copy,
         "stages": stage_copies,
-        "totals": calculate_totals(stage_copies, wall_clock_ms=wall_clock_ms),
+        "totals": calculate_totals(
+            stage_copies,
+            wall_clock_ms=wall_clock_ms,
+            timing_basis=timing_basis,
+        ),
         "output": deepcopy(dict(output)) if output is not None else None,
         "listening_quality_gate": quality,
         "privacy": {
@@ -410,7 +434,9 @@ def validate_report(report: Mapping[str, Any]) -> None:
     stages = report["stages"]
     if isinstance(stages, (str, bytes)) or not isinstance(stages, Sequence):
         raise ReportValidationError("stages must be a sequence")
-    names = [stage.get("name") if isinstance(stage, Mapping) else None for stage in stages]
+    names = [
+        stage.get("name") if isinstance(stage, Mapping) else None for stage in stages
+    ]
     if names != list(STAGE_ORDER):
         raise ReportValidationError(
             "report must contain ordered stages prepare/asr/translate/tts/finalize"
@@ -421,11 +447,17 @@ def validate_report(report: Mapping[str, Any]) -> None:
     totals = _mapping(report["totals"], "totals")
     _require_exact_keys(totals, _TOTAL_KEYS, "totals")
     _non_negative_int(totals["wall_clock_ms"], "totals.wall_clock_ms")
+    if totals["timing_basis"] not in {"wall-clock", "active-process"}:
+        raise ReportValidationError("totals.timing_basis is invalid")
     _non_negative_number(totals["cost_confirmed_cny"], "totals.cost_confirmed_cny")
     _non_negative_number(totals["cost_unconfirmed_cny"], "totals.cost_unconfirmed_cny")
     _non_negative_int(totals["retries"], "totals.retries")
     _non_negative_int(totals["cache_hits"], "totals.cache_hits")
-    expected = calculate_totals(stages, wall_clock_ms=totals["wall_clock_ms"])
+    expected = calculate_totals(
+        stages,
+        wall_clock_ms=totals["wall_clock_ms"],
+        timing_basis=str(totals["timing_basis"]),
+    )
     for key in ("cost_confirmed_cny", "cost_unconfirmed_cny", "retries", "cache_hits"):
         if _decimal_number(totals[key], f"totals.{key}") != _decimal_number(
             expected[key], f"expected.{key}"
@@ -461,7 +493,9 @@ def validate_report(report: Mapping[str, Any]) -> None:
         raise ReportValidationError("privacy flags must all be false")
 
 
-def write_report(report: Mapping[str, Any], target_path: str | os.PathLike[str]) -> Path:
+def write_report(
+    report: Mapping[str, Any], target_path: str | os.PathLike[str]
+) -> Path:
     """Validate and atomically write a report as UTF-8 JSON.
 
     The temporary file is created beside the destination, flushed, and fsynced
@@ -532,12 +566,16 @@ def _validate_work_metrics(item: Mapping[str, Any], location: str) -> None:
     _non_negative_int(item["attempts"], f"{location}.attempts")
     _non_negative_int(item["retries"], f"{location}.retries")
     if item["retries"] > max(item["attempts"] - 1, 0):
-        raise ReportValidationError(f"{location}.retries cannot exceed attempts minus one")
+        raise ReportValidationError(
+            f"{location}.retries cannot exceed attempts minus one"
+        )
     _non_negative_int(item["elapsed_ms"], f"{location}.elapsed_ms")
     if not isinstance(item["cache_hit"], bool):
         raise ReportValidationError(f"{location}.cache_hit must be boolean")
     _non_negative_number(item["cost_confirmed_cny"], f"{location}.cost_confirmed_cny")
-    _non_negative_number(item["cost_unconfirmed_cny"], f"{location}.cost_unconfirmed_cny")
+    _non_negative_number(
+        item["cost_unconfirmed_cny"], f"{location}.cost_unconfirmed_cny"
+    )
     artifact = item["artifact_fingerprint"]
     if artifact is not None:
         _fingerprint(artifact, f"{location}.artifact_fingerprint")
@@ -558,14 +596,20 @@ def _validate_privacy(value: Any, location: str = "report") -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
             if not isinstance(key, str):
-                raise ReportValidationError(f"{location} contains a non-string field name")
+                raise ReportValidationError(
+                    f"{location} contains a non-string field name"
+                )
             normalized = key.lower().replace("-", "_")
-            is_declared_privacy_flag = location == "report.privacy" and key in _PRIVACY_KEYS
+            is_declared_privacy_flag = (
+                location == "report.privacy" and key in _PRIVACY_KEYS
+            )
             if not is_declared_privacy_flag and (
                 normalized in _UNSAFE_EXACT_KEYS
                 or any(part in normalized for part in _UNSAFE_KEY_PARTS)
             ):
-                raise ReportValidationError(f"unsafe field {key!r} is not allowed in reports")
+                raise ReportValidationError(
+                    f"unsafe field {key!r} is not allowed in reports"
+                )
             _validate_privacy(child, f"{location}.{key}")
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         for index, child in enumerate(value):
@@ -589,7 +633,9 @@ def _mapping(value: Any, location: str) -> Mapping[str, Any]:
     return value
 
 
-def _require_exact_keys(value: Mapping[str, Any], expected: set[str], location: str) -> None:
+def _require_exact_keys(
+    value: Mapping[str, Any], expected: set[str], location: str
+) -> None:
     actual = set(value)
     if actual != expected:
         missing = sorted(expected - actual)
@@ -599,7 +645,9 @@ def _require_exact_keys(value: Mapping[str, Any], expected: set[str], location: 
             details.append(f"missing {missing}")
         if extra:
             details.append(f"unexpected {extra}")
-        raise ReportValidationError(f"{location} fields are invalid: {', '.join(details)}")
+        raise ReportValidationError(
+            f"{location} fields are invalid: {', '.join(details)}"
+        )
 
 
 def _safe_identifier(value: Any, location: str) -> None:

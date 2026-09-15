@@ -59,6 +59,140 @@ class TTSChunk:
     voice: str = DEFAULT_TTS_VOICE
 
 
+class IncrementalTTSChunker:
+    """Seal deterministic TTS chunks from source-ordered translated rows.
+
+    ``add`` returns only chunks whose text can no longer change.  The final
+    mutable tail remains buffered until a later row fixes its boundary, the
+    speaker changes, or ``finish`` is called.
+    """
+
+    def __init__(self, *, max_characters: int = TTS_SOFT_MAX_CHARACTERS) -> None:
+        if max_characters <= 0:
+            raise ValueError("max_characters must be greater than zero")
+
+        self._max_characters = max_characters
+        self._speaker_id: str | None = None
+        self._pending_text = ""
+        self._pending_origins: list[str | None] = []
+        self._seen_ids: set[str] = set()
+        self._next_sequence = 1
+        self._finished = False
+        self._turn_requires_sentence_splitting = False
+
+    def add(self, row: PodcastTextRow) -> list[TTSChunk]:
+        """Add one source-ordered row and return newly sealed chunks."""
+
+        if self._finished:
+            raise RuntimeError("cannot add rows after the TTS chunker is finished")
+        if not isinstance(row, PodcastTextRow):
+            raise TypeError("row must be a PodcastTextRow")
+
+        normalized = PodcastTextRow(
+            sequence_id=str(row.sequence_id),
+            text=_normalize_text(row.text),
+            speaker_id=(str(row.speaker_id) if row.speaker_id is not None else None),
+        )
+        if not normalized.text:
+            return []
+        if normalized.sequence_id in self._seen_ids:
+            raise ValueError(f"duplicate row sequence_id: {normalized.sequence_id}")
+        self._seen_ids.add(normalized.sequence_id)
+
+        sealed: list[TTSChunk] = []
+        if self._pending_text and normalized.speaker_id != self._speaker_id:
+            sealed.extend(self._seal_all())
+            self._turn_requires_sentence_splitting = False
+
+        if not self._pending_text:
+            self._speaker_id = normalized.speaker_id
+        else:
+            self._pending_text += " "
+            self._pending_origins.append(None)
+
+        self._pending_text += normalized.text
+        self._pending_origins.extend(normalized.sequence_id for _ in normalized.text)
+        if len(self._pending_text) > self._max_characters:
+            self._turn_requires_sentence_splitting = True
+        sealed.extend(self._seal_stable_prefix())
+        return sealed
+
+    def finish(self) -> list[TTSChunk]:
+        """Seal the final mutable tail and end the incremental input."""
+
+        if self._finished:
+            return []
+        self._finished = True
+        return self._seal_all()
+
+    def flush(self) -> list[TTSChunk]:
+        """Alias for ``finish`` for callers that model end-of-input as flush."""
+
+        return self.finish()
+
+    def _seal_stable_prefix(self) -> list[TTSChunk]:
+        if not self._turn_requires_sentence_splitting:
+            if len(self._pending_text) != self._max_characters:
+                return []
+            parts = _split_normalized_to_budget(
+                self._pending_text, self._max_characters, len
+            )
+            if parts != [self._pending_text]:
+                return []
+            self._turn_requires_sentence_splitting = True
+        else:
+            parts = _split_normalized_to_budget(
+                self._pending_text, self._max_characters, len
+            )
+
+        stable_count = max(0, len(parts) - 1)
+        if parts and len(parts[-1]) == self._max_characters:
+            stable_count += 1
+        return [self._seal_prefix(part) for part in parts[:stable_count]]
+
+    def _seal_all(self) -> list[TTSChunk]:
+        if self._turn_requires_sentence_splitting:
+            parts = _split_normalized_to_budget(
+                self._pending_text, self._max_characters, len
+            )
+        else:
+            parts = _split_to_budget(self._pending_text, self._max_characters, len)
+        return [self._seal_prefix(part) for part in parts]
+
+    def _seal_prefix(self, text: str) -> TTSChunk:
+        consumed = self._consumed_prefix_length(text)
+        row_ids = tuple(
+            dict.fromkeys(
+                origin
+                for origin in self._pending_origins[:consumed]
+                if origin is not None
+            )
+        )
+        while (
+            consumed < len(self._pending_text)
+            and self._pending_text[consumed].isspace()
+        ):
+            consumed += 1
+
+        self._pending_text = self._pending_text[consumed:]
+        del self._pending_origins[:consumed]
+        chunk = TTSChunk(
+            sequence_id=f"tts-{self._next_sequence:06d}",
+            text=text,
+            speaker_id=self._speaker_id,
+            row_sequence_ids=row_ids,
+            character_count=len(text),
+            voice=DEFAULT_TTS_VOICE,
+        )
+        self._next_sequence += 1
+        return chunk
+
+    def _consumed_prefix_length(self, rendered_text: str) -> int:
+        """Map sentence-normalized output back to its pending source prefix."""
+
+        return _rendered_prefix_length(self._pending_text, rendered_text)
+
+
 def estimate_token_units(text: str) -> int:
     """Return a small, deterministic tokenizer-independent size estimate.
 
@@ -195,9 +329,28 @@ def chunk_tts_rows(
 
     chunks: list[TTSChunk] = []
     for turn in turns:
-        turn_text = " ".join(row.text for row in turn)
-        row_ids = tuple(row.sequence_id for row in turn)
-        for text in _split_to_budget(turn_text, max_characters, len):
+        pending_text = ""
+        pending_origins: list[str | None] = []
+        for row in turn:
+            if pending_text:
+                pending_text += " "
+                pending_origins.append(None)
+            pending_text += row.text
+            pending_origins.extend(row.sequence_id for _ in row.text)
+
+        for text in _split_to_budget(pending_text, max_characters, len):
+            consumed = _rendered_prefix_length(pending_text, text)
+            row_ids = tuple(
+                dict.fromkeys(
+                    origin
+                    for origin in pending_origins[:consumed]
+                    if origin is not None
+                )
+            )
+            while consumed < len(pending_text) and pending_text[consumed].isspace():
+                consumed += 1
+            pending_text = pending_text[consumed:]
+            del pending_origins[:consumed]
             chunks.append(
                 TTSChunk(
                     sequence_id=f"tts-{len(chunks) + 1:06d}",
@@ -209,6 +362,23 @@ def chunk_tts_rows(
                 )
             )
     return chunks
+
+
+def _rendered_prefix_length(source: str, rendered: str) -> int:
+    """Map normalized sentence-packed output back to its source prefix."""
+
+    source_index = 0
+    for character in rendered:
+        if character.isspace():
+            while source_index < len(source) and source[source_index].isspace():
+                source_index += 1
+            continue
+        while source_index < len(source) and source[source_index].isspace():
+            source_index += 1
+        if source_index >= len(source) or source[source_index] != character:
+            raise RuntimeError("TTS chunk does not match its canonical source prefix")
+        source_index += 1
+    return source_index
 
 
 def _normalize_rows(
@@ -234,15 +404,11 @@ def _normalize_rows(
             text_value = _first_value(value, keys)
             if text_value is None:
                 raise ValueError(f"row {position} has no text value")
-            source_id = _first_value(
-                value, ("sequence_id", "id", "source_id", "line")
-            )
+            source_id = _first_value(value, ("sequence_id", "id", "source_id", "line"))
             speaker = _first_value(value, ("speaker_id", "speaker"))
             row = PodcastTextRow(
                 sequence_id=(
-                    str(source_id)
-                    if source_id is not None
-                    else f"row-{position:06d}"
+                    str(source_id) if source_id is not None else f"row-{position:06d}"
                 ),
                 text=_normalize_text(str(text_value)),
                 speaker_id=str(speaker) if speaker is not None else None,
@@ -285,9 +451,7 @@ def _measure(text: str, estimator: TokenEstimator) -> int:
     return measured
 
 
-def _split_to_budget(
-    text: str, maximum: int, estimator: TokenEstimator
-) -> list[str]:
+def _split_to_budget(text: str, maximum: int, estimator: TokenEstimator) -> list[str]:
     """Split normalized text while preferring complete sentences."""
 
     text = _normalize_text(text)
@@ -295,6 +459,14 @@ def _split_to_budget(
         return []
     if _measure(text, estimator) <= maximum:
         return [text]
+
+    return _split_normalized_to_budget(text, maximum, estimator)
+
+
+def _split_normalized_to_budget(
+    text: str, maximum: int, estimator: TokenEstimator
+) -> list[str]:
+    """Split normalized over-budget text, including sentence rendering."""
 
     atomic_parts: list[str] = []
     for sentence in _sentence_parts(text):
@@ -396,6 +568,7 @@ __all__ = [
     "TRANSLATION_MAX_TOKEN_UNITS",
     "TRANSLATION_MIN_TOKEN_UNITS",
     "TTS_SOFT_MAX_CHARACTERS",
+    "IncrementalTTSChunker",
     "PodcastTextRow",
     "TTSChunk",
     "TranslationChunk",
