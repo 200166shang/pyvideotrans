@@ -39,6 +39,7 @@ TEXT_DB: Dict[str, Dict[str, str]] = {
     "exec_tts_task": {"zh": "[执行任务] 语音合成 (TTS)", "en": "[Task] Text-to-Speech (TTS)"},
     "exec_sts_task": {"zh": "[执行任务] 字幕翻译 (STS)", "en": "[Task] Subtitle Translation (STS)"},
     "exec_vtv_task": {"zh": "[执行任务] 视频翻译 (VTV)", "en": "[Task] Video Translation (VTV)"},
+    "exec_podcast_task": {"zh": "[执行任务] 中文播客音频", "en": "[Task] Chinese Podcast Audio"},
     "process_file":  {"zh": "[处理文件] {}", "en": "[File] {}"},
     "param_list":    {"zh": "[参数列表] {}", "en": "[Params] {}"},
     "output_dir":    {"zh": "[输出目录] {}", "en": "[Output Dir] {}"},
@@ -67,8 +68,8 @@ TEXT_DB: Dict[str, Dict[str, str]] = {
               "  %(prog)s --list languages"
     },
     "help_task": {
-        "zh": "任务类型: stt(语音转录), tts(文字配音), sts(字幕翻译), vtv(视频翻译)",
-        "en": "Task type: stt(Speech to Text), tts(Text to Speech), sts(Subtitle Trans), vtv(Video Trans)"
+        "zh": "任务类型: stt, tts, sts, vtv, podcast(中文播客), benchmark(播客基准)",
+        "en": "Task type: stt, tts, sts, vtv, podcast(Chinese podcast), benchmark(podcast benchmark)"
     },
     "help_name": {
         "zh": "待处理文件的绝对路径 (请使用双引号包裹含空格的路径)",
@@ -329,9 +330,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument('--version', action='version', version='%(prog)s 4.03')
 
-    parser.add_argument('--task', type=str, choices=['stt', 'tts', 'sts', 'vtv'],
+    parser.add_argument('--task', type=str, choices=['stt', 'tts', 'sts', 'vtv', 'podcast', 'benchmark'],
                         help=tr("help_task"))
     parser.add_argument('--name', type=str, help=tr("help_name"))
+    parser.add_argument('--resume', type=str, default=None,
+                        help="Resume a podcast run from its run directory")
+    parser.add_argument('--podcast-profile', type=str, default='alibaba-podcast-v1',
+                        help="Podcast production profile")
+    parser.add_argument('--cache-mode', choices=['cold'], default='cold',
+                        help="Podcast benchmark cache mode")
+    parser.add_argument('--report', type=str, default=None,
+                        help="Podcast production report path")
+    parser.add_argument('--review', choices=['accepted', 'rejected'], default=None,
+                        help="Record the listener review for a completed podcast run")
+    parser.add_argument('--review-note', type=str, default=None,
+                        help="Optional short listener review note")
 
     parser.add_argument('--list', type=str, choices=['providers', 'languages', 'models'],
                         help=tr("help_list"))
@@ -388,6 +401,17 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 def validate_task_params(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Validate required parameters for the given task type."""
+    if getattr(args, 'review', None) and not getattr(args, 'resume', None):
+        parser.error("--review requires --resume")
+    if getattr(args, 'review_note', None) and not getattr(args, 'review', None):
+        parser.error("--review-note requires --review")
+    if args.task in ('podcast', 'benchmark') and getattr(args, 'resume', None):
+        if args.name:
+            parser.error("--name and --resume cannot be used together")
+        if not Path(args.resume).is_dir():
+            parser.error(f"Run directory does not exist: {args.resume}")
+        return
+
     if not args.name:
         parser.error("--name is required")
 
@@ -561,6 +585,20 @@ def main() -> int:
     # Get GPU info
     from videotrans.util.gpus import getset_gpu
     getset_gpu()
+
+    if args.task in ('podcast', 'benchmark'):
+        from videotrans.podcast.cli_runner import run_from_args
+        try:
+            return run_from_args(args)
+        except KeyboardInterrupt:
+            print("\nInterrupted.", file=sys.stderr)
+            return 130
+        except Exception as e:
+            safe_message = getattr(e, "safe_message", None)
+            if safe_message is None and e.__class__.__module__.startswith("videotrans.podcast"):
+                safe_message = str(e)
+            print(tr('failed', safe_message or type(e).__name__), file=sys.stderr)
+            return 1
 
     # Build common params
     common_params = build_common_params(args, output_dir=args.output_dir)

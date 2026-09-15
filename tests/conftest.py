@@ -33,6 +33,16 @@ _HAS_HF_HUB = _is_installed("huggingface_hub")
 _HAS_TENVAD = _is_installed("ten_vad")
 _HAS_PYDUB = _is_installed("pydub")
 
+if not _HAS_TORCH:
+    import types
+
+    _torch = types.ModuleType("torch")
+    _torch_cuda = types.ModuleType("torch.cuda")
+    _torch_cuda.is_available = lambda: False
+    _torch.cuda = _torch_cuda
+    sys.modules["torch"] = _torch
+    sys.modules["torch.cuda"] = _torch_cuda
+
 if not _HAS_PYSIDE6:
     _pyside_mock = MagicMock()
     _pyside_mock.QtCore = MagicMock()
