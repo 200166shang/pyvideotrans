@@ -180,7 +180,7 @@ class AppParams:
             "qwentts_spaceid": "",
             "qwentts_key": "",
             "qwentts_model": "qwen-tts-latest",
-            "qwentts_role": "Chelsie",
+            "qwentts_role": "Andre",
             "kokoro_api": "http://127.0.0.1:5066",
             "openairecognapi_url": "",
             "openairecognapi_key": "",
