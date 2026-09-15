@@ -1,4 +1,7 @@
 import json
+import shutil
+import struct
+import wave
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -53,3 +56,25 @@ def test_finalizer_rejects_missing_chunks(tmp_path: Path) -> None:
 def test_finalizer_requires_at_least_one_chunk(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         Mp3Finalizer().finalize([], tmp_path / "edition.mp3")
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg and ffprobe are required",
+)
+def test_finalizer_runs_real_ffmpeg_for_extensionless_audio_chunks(tmp_path: Path) -> None:
+    chunks = [tmp_path / "000000.audio", tmp_path / "000001.audio"]
+    for chunk in chunks:
+        with wave.open(str(chunk), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(16000)
+            output.writeframes(b"".join(struct.pack("<h", 0) for _ in range(1600)))
+
+    result = Mp3Finalizer().finalize(chunks, tmp_path / "edition.mp3")
+
+    assert result.path.stat().st_size > 0
+    assert result.duration_ms >= 150
+    assert result.bitrate_kbps in range(60, 70)
+    assert result.channels == 1
+    assert result.sample_rate_hz == 48000

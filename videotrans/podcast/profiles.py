@@ -16,6 +16,7 @@ class PodcastProfile:
     tts_model: str
     voice: str
     translation_concurrency: int
+    translation_rpm: int
     tts_concurrency: int
     tts_rpm: int
     translation_chunk_min: int
@@ -41,6 +42,7 @@ ALIBABA_PODCAST_V1 = PodcastProfile(
     tts_model="qwen3-tts-flash-2025-11-27",
     voice="Andre",
     translation_concurrency=4,
+    translation_rpm=60,
     tts_concurrency=4,
     tts_rpm=150,
     translation_chunk_min=600,

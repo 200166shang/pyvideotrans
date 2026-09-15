@@ -39,3 +39,15 @@ def test_resume_rejects_source_name(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         validate_task_params(args, parser)
+
+
+def test_review_requires_resume(tmp_path: Path) -> None:
+    source = tmp_path / "source.m4a"
+    source.touch()
+    parser = build_parser()
+    args = parser.parse_args(
+        ["--task", "podcast", "--name", str(source), "--review", "accepted"]
+    )
+
+    with pytest.raises(SystemExit):
+        validate_task_params(args, parser)

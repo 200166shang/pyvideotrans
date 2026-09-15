@@ -8,24 +8,34 @@ import json
 import os
 import subprocess
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 
 from .alibaba_asr import AlibabaWholeFileAsrClient, AsrPollResult
-from .alibaba_text import AlibabaTTSAdapter, AlibabaTranslationAdapter
+from .alibaba_text import AlibabaTranslationAdapter, AlibabaTTSAdapter
 from .chunking import PodcastTextRow, chunk_translation_rows, chunk_tts_rows
 from .finalize import FinalizedAudio, Mp3Finalizer
 from .manifest import ManifestStore, PodcastManifest, atomic_write_json
 from .profiles import PodcastProfile
-from .report import build_report, fingerprint_file, make_chunk, make_stage, write_report
+from .report import (
+    build_report,
+    fingerprint_file,
+    make_chunk,
+    make_stage,
+    validate_report,
+    write_report,
+)
 from .scheduler import AsyncScheduler
-
 
 PRIVATE_STATE_NAME = "run.private.json"
 MANIFEST_NAME = "manifest.json"
 DEFAULT_REPORT_NAME = "production-report.json"
 DEFAULT_OUTPUT_NAME = "podcast.zh-CN.mp3"
+ASR_CNY_PER_SECOND = 0.00022
+TRANSLATION_CONSERVATIVE_CNY_PER_MILLION_TOKENS = 1.95
+TTS_CNY_PER_TEN_THOUSAND_CHARACTERS = 0.8
 
 
 class UploadAudio(Protocol):
@@ -88,12 +98,36 @@ class PodcastCoordinator:
         run_directory = Path(run_directory).expanduser().resolve()
         run_directory.mkdir(parents=True, exist_ok=True)
         store = ManifestStore(run_directory / MANIFEST_NAME, lock_timeout=0)
+        existing = list(run_directory.iterdir())
+        if existing:
+            if store.path in existing:
+                raise PodcastPipelineError(
+                    "run_already_exists",
+                    "Run directory already contains a manifest; use --resume",
+                )
+            raise PodcastPipelineError(
+                "run_directory_not_empty",
+                "Run directory is not empty and has no resumable manifest",
+            )
+        normalized_report_path = (
+            _validate_new_report_destination(source, run_directory, report_path)
+            if report_path
+            else None
+        )
 
         with store.run_lock():
             if store.path.exists():
                 raise PodcastPipelineError(
                     "run_already_exists",
                     "Run directory already contains a manifest; use --resume",
+                )
+            unexpected = [
+                path for path in run_directory.iterdir() if path != store.lock_path
+            ]
+            if unexpected:
+                raise PodcastPipelineError(
+                    "run_directory_not_empty",
+                    "Run directory is not empty and has no resumable manifest",
                 )
             duration_ms = probe_duration_ms(source)
             input_fingerprint = fingerprint_file(source)
@@ -105,18 +139,22 @@ class PodcastCoordinator:
                 "schema_version": 1,
                 "source_path": str(source),
                 "profile_id": self.profile.id,
+                "profile_fingerprint": self.profile.fingerprint,
                 "cache_mode": cache_mode,
-                "report_path": str(Path(report_path).expanduser().resolve())
-                if report_path
+                "report_path": str(normalized_report_path)
+                if normalized_report_path
                 else None,
                 "input_fingerprint": input_fingerprint,
                 "input_duration_ms": duration_ms,
+                "asr_submission_state": "not_started",
                 "stage_elapsed_ms": {},
                 "chunk_elapsed_ms": {"translate": {}, "tts": {}},
             }
             atomic_write_json(run_directory / PRIVATE_STATE_NAME, state)
             store.save(manifest)
-            return self._execute(run_directory, manifest, state, store, report_path)
+            return self._execute(
+                run_directory, manifest, state, store, normalized_report_path
+            )
 
     def resume(
         self,
@@ -133,12 +171,49 @@ class PodcastCoordinator:
             )
         with store.run_lock():
             state = _read_json(state_path)
-            if state.get("profile_id") != self.profile.id:
+            if (
+                state.get("profile_id") != self.profile.id
+                or state.get("profile_fingerprint") != self.profile.fingerprint
+            ):
                 raise PodcastPipelineError(
                     "profile_mismatch", "Saved run uses a different production profile"
                 )
+            destination = _resolve_report_destination(
+                run_directory, state, report_path
+            )
             manifest = store.load(resume=True)
-            return self._execute(run_directory, manifest, state, store, report_path)
+            if manifest.run["status"] in {"accepted", "rejected"}:
+                return self._terminal_result(
+                    run_directory, manifest, state, report_path=destination
+                )
+            return self._execute(run_directory, manifest, state, store, destination)
+
+    def _terminal_result(
+        self,
+        run_directory: Path,
+        manifest: PodcastManifest,
+        state: Mapping[str, Any],
+        *,
+        report_path: Path | None,
+    ) -> PodcastRunResult:
+        destination = _resolve_report_destination(run_directory, state, report_path)
+        report = _read_json(destination)
+        validate_report(report)
+        if report["run"]["status"] != manifest.run["status"]:
+            raise PodcastPipelineError(
+                "review_state_mismatch",
+                "Manifest and production report review states do not match",
+            )
+        output = run_directory / DEFAULT_OUTPUT_NAME
+        _validate_artifact(
+            output, manifest.stage("finalize")["artifact"], run_directory
+        )
+        return PodcastRunResult(
+            run_directory=run_directory,
+            output_path=output,
+            report_path=destination,
+            status=manifest.run["status"],
+        )
 
     def _execute(
         self,
@@ -152,8 +227,12 @@ class PodcastCoordinator:
         private_dir.mkdir(parents=True, exist_ok=True)
         source = Path(state["source_path"])
 
-        self._prepare(source, private_dir, manifest, state, store, run_directory)
-        segments = self._asr(source, private_dir, manifest, state, store, run_directory)
+        prepared_audio = self._prepare(
+            source, private_dir, manifest, state, store, run_directory
+        )
+        segments = self._asr(
+            prepared_audio, private_dir, manifest, state, store, run_directory
+        )
         translated = self._translate(
             segments, private_dir, manifest, state, store, run_directory
         )
@@ -185,31 +264,48 @@ class PodcastCoordinator:
         state: dict[str, Any],
         store: ManifestStore,
         run_directory: Path,
-    ) -> None:
+    ) -> Path:
+        prepared_audio = private_dir / "input.asr.m4a"
         if manifest.stage("prepare")["status"] == "completed":
-            return
+            _validate_artifact(
+                prepared_audio,
+                manifest.stage("prepare")["artifact"],
+                run_directory,
+            )
+            return prepared_audio
         if not source.is_file():
             raise PodcastPipelineError(
                 "input_not_found", "Original input is required to resume this stage"
             )
-        self._timed_stage(
-            "prepare",
-            manifest,
-            state,
-            store,
-            run_directory,
-            lambda: self._commit_json_stage(
-                "prepare",
+        started = self._clock()
+        manifest.start_stage("prepare")
+        store.save(manifest)
+        try:
+            prepare_asr_audio(source, prepared_audio)
+            atomic_write_json(
                 private_dir / "prepare.json",
                 {
                     "input_fingerprint": state["input_fingerprint"],
                     "duration_ms": state["input_duration_ms"],
+                    "sample_rate_hz": 16000,
+                    "channels": 1,
+                    "codec": "aac",
                 },
-                manifest,
-                store,
-                run_directory,
-            ),
-        )
+            )
+            manifest.commit_stage(
+                "prepare",
+                artifact_identity=fingerprint_file(prepared_audio),
+                artifact_path=prepared_audio.relative_to(run_directory).as_posix(),
+                size_bytes=prepared_audio.stat().st_size,
+            )
+            store.save(manifest)
+        except Exception:
+            manifest.fail_stage("prepare")
+            store.save(manifest)
+            raise
+        finally:
+            self._add_stage_elapsed("prepare", started, state, run_directory)
+        return prepared_audio
 
     def _asr(
         self,
@@ -222,6 +318,9 @@ class PodcastCoordinator:
     ) -> list[dict[str, Any]]:
         artifact_path = private_dir / "asr.json"
         if manifest.stage("asr")["status"] == "completed":
+            _validate_artifact(
+                artifact_path, manifest.stage("asr")["artifact"], run_directory
+            )
             return list(_read_json(artifact_path)["segments"])
         if not source.is_file():
             raise PodcastPipelineError(
@@ -234,14 +333,24 @@ class PodcastCoordinator:
         try:
             task_id = manifest.stage("asr")["task_id"]
             if task_id is None:
+                if state.get("asr_submission_state") == "in_flight":
+                    raise PodcastPipelineError(
+                        "asr_submission_uncertain",
+                        "ASR submission may have been accepted before interruption; "
+                        "verify it manually instead of submitting again",
+                    )
                 audio_url = self.runtime.upload_audio(source)
+                state["asr_submission_state"] = "in_flight"
+                atomic_write_json(run_directory / PRIVATE_STATE_NAME, state)
                 submitted = self.runtime.asr.submit(
                     audio_url, language=self.profile.source_language
                 )
                 manifest.set_asr_task_id(submitted.task_id)
                 store.save(manifest)
+                state["asr_submission_state"] = "task_recorded"
+                atomic_write_json(run_directory / PRIVATE_STATE_NAME, state)
                 task_id = submitted.task_id
-            result = self._wait_for_asr(task_id)
+            result = self._wait_for_asr(task_id, state, run_directory)
             payload = {
                 "usage_duration_seconds": result.usage.duration_seconds,
                 "segments": [
@@ -274,7 +383,9 @@ class PodcastCoordinator:
         finally:
             self._add_stage_elapsed("asr", started, state, run_directory)
 
-    def _wait_for_asr(self, task_id: str) -> AsrPollResult:
+    def _wait_for_asr(
+        self, task_id: str, state: dict[str, Any], run_directory: Path
+    ) -> AsrPollResult:
         transient_failures = 0
         poll_attempt = 0
         while True:
@@ -285,6 +396,8 @@ class PodcastCoordinator:
                     raise
                 delay = min(30.0, 2.0**transient_failures)
                 transient_failures += 1
+                state["asr_poll_retries"] = int(state.get("asr_poll_retries", 0)) + 1
+                atomic_write_json(run_directory / PRIVATE_STATE_NAME, state)
                 self._sleeper(delay)
                 continue
             if result.is_complete:
@@ -317,6 +430,10 @@ class PodcastCoordinator:
         ]
         manifest.define_chunks("translate", sources)
         store.save(manifest)
+        for item in manifest.stage("translate")["chunks"]:
+            if item["status"] == "committed":
+                path = private_dir / "translate" / f"{item['index']:06d}.json"
+                _validate_artifact(path, item["artifact"], run_directory)
         pending = [
             chunks[item["index"]]
             for item in manifest.stage("translate")["chunks"]
@@ -328,7 +445,7 @@ class PodcastCoordinator:
             store.save(manifest)
             scheduler = AsyncScheduler(
                 concurrency=self.profile.translation_concurrency,
-                requests_per_minute=60_000,
+                requests_per_minute=self.profile.translation_rpm,
                 initial_tokens=1,
             )
 
@@ -351,6 +468,12 @@ class PodcastCoordinator:
                 size_bytes=aggregate_path.stat().st_size,
             )
             store.save(manifest)
+        else:
+            _validate_artifact(
+                aggregate_path,
+                manifest.stage("translate")["artifact"],
+                run_directory,
+            )
         return list(_read_json(aggregate_path)["rows"])
 
     async def _translate_one(
@@ -433,6 +556,9 @@ class PodcastCoordinator:
         ]
         manifest.define_chunks("tts", sources)
         store.save(manifest)
+        for item in manifest.stage("tts")["chunks"]:
+            if item["status"] == "committed":
+                _validate_tts_artifact(item, private_dir, run_directory)
         if not chunks:
             raise PodcastPipelineError(
                 "no_speech", "The transcription did not produce speech to synthesize"
@@ -488,16 +614,23 @@ class PodcastCoordinator:
             result = await asyncio.to_thread(self.runtime.tts.synthesize, chunk.text)
             path = private_dir / "tts" / f"{item['index']:06d}.audio"
             _atomic_write_bytes(path, result.audio)
+            descriptor = path.with_suffix(".json")
             atomic_write_json(
-                path.with_suffix(".json"),
-                {"usage": result.usage, "voice": self.profile.voice},
+                descriptor,
+                {
+                    "usage": result.usage,
+                    "voice": self.profile.voice,
+                    "audio_path": path.relative_to(run_directory).as_posix(),
+                    "audio_fingerprint": fingerprint_file(path),
+                    "audio_size_bytes": path.stat().st_size,
+                },
             )
             manifest.commit_chunk(
                 "tts",
                 item["identity"],
-                artifact_identity=fingerprint_file(path),
-                artifact_path=path.relative_to(run_directory).as_posix(),
-                size_bytes=path.stat().st_size,
+                artifact_identity=fingerprint_file(descriptor),
+                artifact_path=descriptor.relative_to(run_directory).as_posix(),
+                size_bytes=descriptor.stat().st_size,
             )
             store.save(manifest)
             return path
@@ -522,6 +655,9 @@ class PodcastCoordinator:
     ) -> FinalizedAudio:
         output = run_directory / DEFAULT_OUTPUT_NAME
         if manifest.stage("finalize")["status"] == "completed":
+            _validate_artifact(
+                output, manifest.stage("finalize")["artifact"], run_directory
+            )
             return _probe_finalized(output)
         started = self._clock()
         manifest.start_stage("finalize")
@@ -559,9 +695,15 @@ class PodcastCoordinator:
             if state.get("report_path")
             else run_directory / DEFAULT_REPORT_NAME
         )
+        quality = {"status": "pending", "decided_at": None, "note": None}
+        if manifest.run["status"] in {"accepted", "rejected"} and destination.is_file():
+            existing = _read_json(destination)
+            existing_quality = existing.get("listening_quality_gate")
+            if isinstance(existing_quality, dict):
+                quality = existing_quality
         report = build_report(
             run_id=manifest.run["identity"],
-            run_status="awaiting_review",
+            run_status=manifest.run["status"],
             cache_mode=str(state["cache_mode"]),
             input_fingerprint=str(state["input_fingerprint"]),
             input_duration_ms=int(state["input_duration_ms"]),
@@ -579,7 +721,7 @@ class PodcastCoordinator:
                 },
             },
             stages=[
-                self._report_stage(name, manifest, state)
+                self._report_stage(name, manifest, state, run_directory)
                 for name in ("prepare", "asr", "translate", "tts", "finalize")
             ],
             output={
@@ -589,11 +731,16 @@ class PodcastCoordinator:
                 "duration_ms": finalized.duration_ms,
                 "fingerprint": f"sha256:{finalized.fingerprint}",
             },
+            listening_quality_gate=quality,
         )
         return write_report(report, destination)
 
     def _report_stage(
-        self, name: str, manifest: PodcastManifest, state: Mapping[str, Any]
+        self,
+        name: str,
+        manifest: PodcastManifest,
+        state: Mapping[str, Any],
+        run_directory: Path,
     ) -> dict[str, Any]:
         stage = manifest.stage(name)
         provider = {
@@ -618,57 +765,23 @@ class PodcastCoordinator:
             )
             for item in stage["chunks"]
         ]
+        retries = stage["retries"] + sum(item["retries"] for item in stage["chunks"])
+        if name == "asr":
+            retries += int(state.get("asr_poll_retries", 0))
+        attempts = max(stage["attempts"], retries + 1 if retries else stage["attempts"])
         return make_stage(
             name,
             provider=provider,
             status="succeeded" if stage["status"] == "completed" else "pending",
-            attempts=stage["attempts"],
-            retries=min(stage["retries"], max(stage["attempts"] - 1, 0)),
+            attempts=attempts,
+            retries=retries,
             elapsed_ms=int(state.get("stage_elapsed_ms", {}).get(name, 0)),
+            cost_unconfirmed_cny=_unconfirmed_stage_cost(name, run_directory),
             chunks=chunks,
             artifact_fingerprint=stage["artifact"]["identity"]
             if stage["artifact"]
             else None,
         )
-
-    def _timed_stage(
-        self,
-        name: str,
-        manifest: PodcastManifest,
-        state: dict[str, Any],
-        store: ManifestStore,
-        run_directory: Path,
-        operation: Callable[[], None],
-    ) -> None:
-        started = self._clock()
-        manifest.start_stage(name)
-        store.save(manifest)
-        try:
-            operation()
-        except Exception:
-            manifest.fail_stage(name)
-            store.save(manifest)
-            raise
-        finally:
-            self._add_stage_elapsed(name, started, state, run_directory)
-
-    @staticmethod
-    def _commit_json_stage(
-        name: str,
-        path: Path,
-        payload: Mapping[str, Any],
-        manifest: PodcastManifest,
-        store: ManifestStore,
-        run_directory: Path,
-    ) -> None:
-        atomic_write_json(path, payload)
-        manifest.commit_stage(
-            name,
-            artifact_identity=fingerprint_file(path),
-            artifact_path=path.relative_to(run_directory).as_posix(),
-            size_bytes=path.stat().st_size,
-        )
-        store.save(manifest)
 
     def _add_stage_elapsed(
         self, name: str, started: float, state: dict[str, Any], run_directory: Path
@@ -718,6 +831,48 @@ def probe_duration_ms(path: Path) -> int:
         ) from error
 
 
+def prepare_asr_audio(source: Path, destination: Path) -> Path:
+    """Create the mono 16 kHz AAC input required for diarized whole-file ASR."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.stem}.{os.getpid()}.partial.m4a")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(source),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "48k",
+                str(temporary),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        if not temporary.is_file() or temporary.stat().st_size == 0:
+            raise OSError("empty prepared audio")
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        return destination
+    except (OSError, subprocess.SubprocessError) as error:
+        raise PodcastPipelineError(
+            "input_prepare_failed", "Could not prepare mono audio for recognition"
+        ) from error
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _probe_finalized(path: Path) -> FinalizedAudio:
     if not path.is_file():
         raise PodcastPipelineError("output_missing", "Committed output file is missing")
@@ -730,7 +885,7 @@ def _probe_finalized(path: Path) -> FinalizedAudio:
                 "-select_streams",
                 "a:0",
                 "-show_entries",
-                "stream=sample_rate,channels:format=duration,bit_rate",
+                "stream=sample_rate,channels,bit_rate:format=duration,bit_rate",
                 "-of",
                 "json",
                 str(path),
@@ -744,7 +899,10 @@ def _probe_finalized(path: Path) -> FinalizedAudio:
             path=path,
             fingerprint=fingerprint_file(path).removeprefix("sha256:"),
             duration_ms=round(float(data["format"]["duration"]) * 1000),
-            bitrate_kbps=round(int(data["format"]["bit_rate"]) / 1000),
+            bitrate_kbps=round(
+                int(data["streams"][0].get("bit_rate") or data["format"]["bit_rate"])
+                / 1000
+            ),
             channels=int(data["streams"][0]["channels"]),
             sample_rate_hz=int(data["streams"][0]["sample_rate"]),
         )
@@ -793,6 +951,170 @@ def _paths_identity(paths: Sequence[Path]) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def _validate_artifact(
+    path: Path, artifact: Mapping[str, Any] | None, run_directory: Path
+) -> None:
+    if artifact is None or not path.is_file():
+        raise PodcastPipelineError(
+            "artifact_invalid", "A committed run artifact is missing"
+        )
+    try:
+        expected_path = artifact.get("path")
+        if expected_path is not None and path.relative_to(run_directory).as_posix() != expected_path:
+            raise ValueError
+        expected_size = artifact.get("size_bytes")
+        if expected_size is not None and path.stat().st_size != expected_size:
+            raise ValueError
+        if fingerprint_file(path) != artifact.get("identity"):
+            raise ValueError
+    except (OSError, ValueError) as error:
+        raise PodcastPipelineError(
+            "artifact_invalid", "A committed run artifact failed validation"
+        ) from error
+
+
+def _validate_tts_artifact(
+    item: Mapping[str, Any], private_dir: Path, run_directory: Path
+) -> None:
+    descriptor = private_dir / "tts" / f"{item['index']:06d}.json"
+    _validate_artifact(descriptor, item.get("artifact"), run_directory)
+    data = _read_json(descriptor)
+    audio_path = private_dir / "tts" / f"{item['index']:06d}.audio"
+    expected_relative = audio_path.relative_to(run_directory).as_posix()
+    if not audio_path.is_file():
+        raise PodcastPipelineError(
+            "artifact_invalid", "A committed TTS audio artifact is missing"
+        )
+    if (
+        data.get("audio_path") != expected_relative
+        or data.get("audio_size_bytes") != audio_path.stat().st_size
+    ):
+        raise PodcastPipelineError(
+            "artifact_invalid", "A committed TTS audio artifact failed validation"
+        )
+    if fingerprint_file(audio_path) != data.get("audio_fingerprint"):
+        raise PodcastPipelineError(
+            "artifact_invalid", "A committed TTS audio artifact failed validation"
+        )
+
+
+def _unconfirmed_stage_cost(name: str, run_directory: Path) -> float:
+    """Estimate Beijing list-price cost from persisted numeric usage only."""
+
+    private_dir = run_directory / "private"
+    if name == "asr":
+        usage = _read_json(private_dir / "asr.json").get("usage_duration_seconds")
+        return round(float(usage or 0) * ASR_CNY_PER_SECOND, 8)
+    if name == "translate":
+        units = sum(
+            float(_read_json(path).get("usage") or 0)
+            for path in sorted((private_dir / "translate").glob("*.json"))
+        )
+        # The adapter currently records total tokens. Charging every token at
+        # the higher output rate intentionally makes this a conservative estimate.
+        return round(
+            units * TRANSLATION_CONSERVATIVE_CNY_PER_MILLION_TOKENS / 1_000_000,
+            8,
+        )
+    if name == "tts":
+        characters = sum(
+            float(_read_json(path).get("usage") or 0)
+            for path in sorted((private_dir / "tts").glob("*.json"))
+        )
+        return round(
+            characters * TTS_CNY_PER_TEN_THOUSAND_CHARACTERS / 10_000,
+            8,
+        )
+    return 0.0
+
+
+def _validate_new_report_destination(
+    source: Path, run_directory: Path, report_path: Path
+) -> Path:
+    destination = report_path.expanduser().resolve()
+    private_directory = run_directory / "private"
+    reserved = {
+        source,
+        run_directory / MANIFEST_NAME,
+        run_directory / f"{MANIFEST_NAME}.lock",
+        run_directory / PRIVATE_STATE_NAME,
+        run_directory / DEFAULT_OUTPUT_NAME,
+        run_directory / "benchmark-summary.json",
+    }
+    try:
+        inside_private = destination.is_relative_to(private_directory)
+    except AttributeError:  # pragma: no cover - Python < 3.9 compatibility
+        inside_private = private_directory == destination or private_directory in destination.parents
+    if destination.exists() or destination in reserved or inside_private:
+        raise PodcastPipelineError(
+            "report_path_unsafe",
+            "New report path must be unused and outside private/reserved artifacts",
+        )
+    return destination
+
+
+def _resolve_report_destination(
+    run_directory: Path,
+    state: Mapping[str, Any],
+    requested: Path | None,
+) -> Path:
+    saved = (
+        Path(str(state["report_path"])).expanduser().resolve()
+        if state.get("report_path")
+        else run_directory / DEFAULT_REPORT_NAME
+    )
+    if requested is not None and requested.expanduser().resolve() != saved:
+        raise PodcastPipelineError(
+            "report_path_mismatch",
+            "Resume and review must use the report path saved by the run",
+        )
+    return saved
+
+
+def load_terminal_run(
+    run_directory: Path,
+    profile: PodcastProfile,
+    *,
+    report_path: Path | None = None,
+) -> PodcastRunResult | None:
+    """Load an accepted/rejected run without constructing cloud providers."""
+
+    run_directory = run_directory.expanduser().resolve()
+    state = _read_json(run_directory / PRIVATE_STATE_NAME)
+    if (
+        state.get("profile_id") != profile.id
+        or state.get("profile_fingerprint") != profile.fingerprint
+    ):
+        raise PodcastPipelineError(
+            "profile_mismatch", "Saved run uses a different production profile"
+        )
+    store = ManifestStore(run_directory / MANIFEST_NAME, lock_timeout=0)
+    with store.run_lock():
+        manifest = store.load()
+        if manifest.run["status"] not in {"accepted", "rejected"}:
+            return None
+        destination = _resolve_report_destination(
+            run_directory, state, report_path
+        )
+        report = _read_json(destination)
+        validate_report(report)
+        if report["run"]["status"] != manifest.run["status"]:
+            raise PodcastPipelineError(
+                "review_state_mismatch",
+                "Manifest and production report review states do not match",
+            )
+        output = run_directory / DEFAULT_OUTPUT_NAME
+        _validate_artifact(
+            output, manifest.stage("finalize")["artifact"], run_directory
+        )
+        return PodcastRunResult(
+            run_directory=run_directory,
+            output_path=output,
+            report_path=destination,
+            status=manifest.run["status"],
+        )
+
+
 __all__ = [
     "DEFAULT_OUTPUT_NAME",
     "DEFAULT_REPORT_NAME",
@@ -800,5 +1122,7 @@ __all__ = [
     "PodcastPipelineError",
     "PodcastRunResult",
     "PodcastRuntime",
+    "load_terminal_run",
+    "prepare_asr_audio",
     "probe_duration_ms",
 ]

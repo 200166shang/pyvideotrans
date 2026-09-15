@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from numbers import Real
-from typing import Any, Callable, Iterable, Mapping, Protocol
-
+from typing import Any, Protocol
 
 BEIJING_ENDPOINT = "https://dashscope.aliyuncs.com/api/v1"
 BEIJING_REGION = "cn-beijing"
@@ -319,7 +319,7 @@ class QwenTTSAdapter:
 
         response = _call(self._transport, **kwargs)
         events: Iterable[Any]
-        if isinstance(response, Mapping) or isinstance(response, (str, bytes, bytearray)):
+        if isinstance(response, (Mapping, str, bytes, bytearray)):
             events = (response,)
         else:
             try:
@@ -327,7 +327,6 @@ class QwenTTSAdapter:
             except TypeError:
                 events = (response,)
 
-        audio_parts: list[bytes] = []
         final_url: str | None = None
         usage: int | float = 0
         request_id: str | None = None
@@ -346,7 +345,10 @@ class QwenTTSAdapter:
                     if isinstance(encoded, str) and "," in encoded and encoded.startswith("data:"):
                         encoded = encoded.split(",", 1)[1]
                     try:
-                        audio_parts.append(base64.b64decode(encoded, validate=True))
+                        # Validate intermediate chunks but do not persist them:
+                        # Qwen3-TTS streaming data is raw playback audio, while
+                        # the final event URL is the complete WAV artifact.
+                        base64.b64decode(encoded, validate=True)
                     except (binascii.Error, TypeError, ValueError) as exc:
                         raise TransientAlibabaError(
                             code="invalid_audio_data",
@@ -361,12 +363,12 @@ class QwenTTSAdapter:
         except Exception as exc:
             raise _transport_failure(exc) from exc
 
-        if audio_parts:
-            audio = b"".join(audio_parts)
-        elif final_url:
+        if final_url:
             audio = self._download(final_url, request_id)
         else:
-            raise TransientAlibabaError(code="missing_audio", request_id=request_id)
+            raise TransientAlibabaError(
+                code="missing_complete_audio_url", request_id=request_id
+            )
 
         return SpeechResult(audio=audio, usage=usage, request_id=request_id)
 

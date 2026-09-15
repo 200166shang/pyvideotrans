@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping, Sequence
-
+from typing import Any
 
 DEFAULT_TTS_VOICE = "Andre"
 TRANSLATION_MIN_TOKEN_UNITS = 600
@@ -86,11 +86,11 @@ def chunk_translation_rows(
 ) -> list[TranslationChunk]:
     """Create deterministic, turn-aware translation chunks.
 
-    A known speaker change is used as a chunk boundary once the current chunk is
-    at least ``min_token_units``.  Crossing that boundary is allowed only when it
-    helps an undersized chunk approach the target.  ``max_token_units`` is kept as
-    a hard request bound; exceptionally long rows are split at sentence, then
-    whitespace/punctuation, boundaries before a character-level fallback.
+    Known speaker turn boundaries are hard. Within one turn, the first row
+    boundary after ``min_token_units`` is the preferred packing cut.
+    ``max_token_units`` remains a hard request bound; exceptionally long rows
+    are split at sentence, then whitespace/punctuation, boundaries before a
+    character-level fallback.
     """
 
     _validate_limits(min_token_units, max_token_units, "token units")
@@ -143,8 +143,14 @@ def chunk_translation_rows(
         current_size = _measure(current_text, token_estimator)
         speaker_changed = row.speaker_id != current[-1].speaker_id
 
-        # Once the minimum target is met, a turn boundary is the cleanest cut.
-        if speaker_changed and current_size >= min_token_units:
+        # A known turn boundary is hard: translated text must remain mappable
+        # to one speaker turn for deterministic TTS chunking.
+        if speaker_changed:
+            flush()
+            current.append(row)
+            continue
+
+        if current_size >= min_token_units:
             flush()
             current.append(row)
             continue
@@ -387,11 +393,11 @@ def _split_overlong_part(
 
 __all__ = [
     "DEFAULT_TTS_VOICE",
-    "PodcastTextRow",
-    "TTSChunk",
-    "TTS_SOFT_MAX_CHARACTERS",
     "TRANSLATION_MAX_TOKEN_UNITS",
     "TRANSLATION_MIN_TOKEN_UNITS",
+    "TTS_SOFT_MAX_CHARACTERS",
+    "PodcastTextRow",
+    "TTSChunk",
     "TranslationChunk",
     "chunk_translation_rows",
     "chunk_tts_rows",

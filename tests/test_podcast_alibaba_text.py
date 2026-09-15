@@ -151,21 +151,28 @@ def tts_event(data=None, url=None, usage=None, request_id="tts-request"):
     }
 
 
-def test_tts_uses_pinned_andre_stream_and_joins_base64_chunks():
-    transport = FakeTransport(iter([tts_event(b"abc", request_id="first"), tts_event(b"def", request_id="last")]))
+def test_tts_uses_pinned_andre_stream_and_downloads_complete_wav():
+    transport = FakeTransport(
+        iter(
+            [
+                tts_event(b"raw-pcm", request_id="first"),
+                tts_event(url="https://example.invalid/final.wav", request_id="last"),
+            ]
+        )
+    )
     downloader_calls = []
     adapter = AlibabaTTSAdapter(
         transport,
-        downloader=lambda url: downloader_calls.append(url),
+        downloader=lambda url: downloader_calls.append(url) or b"complete-wav",
         api_key="test-key",
     )
 
     result = adapter.synthesize("沉稳男声")
 
-    assert result.audio == b"abcdef"
+    assert result.audio == b"complete-wav"
     assert result.usage == 6
     assert result.request_id == "last"
-    assert downloader_calls == []
+    assert downloader_calls == ["https://example.invalid/final.wav"]
     assert adapter.model == QWEN_TTS_MODEL == "qwen3-tts-flash-2025-11-27"
     assert adapter.voice == QWEN_TTS_VOICE == "Andre"
     assert adapter.language == QWEN_TTS_LANGUAGE == "Chinese"
@@ -196,22 +203,23 @@ def test_tts_downloads_final_url_when_stream_has_no_audio_data():
     assert urls == ["https://example.invalid/audio.wav"]
 
 
-def test_tts_prefers_streamed_chunks_over_final_url():
+def test_tts_prefers_complete_final_url_over_raw_streamed_chunks():
     downloaded = []
     events = iter([tts_event(b"chunk"), tts_event(url="https://example.invalid/final.wav")])
     result = AlibabaTTSAdapter(
         FakeTransport(events),
-        downloader=lambda url: downloaded.append(url),
+        downloader=lambda url: downloaded.append(url) or b"complete-wav",
     ).synthesize("中文")
-    assert result.audio == b"chunk"
-    assert downloaded == []
+    assert result.audio == b"complete-wav"
+    assert downloaded == ["https://example.invalid/final.wav"]
 
 
 def test_tts_exposes_soft_limit_but_only_rejects_over_hard_limit():
     adapter = AlibabaTTSAdapter(FakeTransport(iter([tts_event(b"audio")])))
     assert adapter.soft_text_limit == 500
     assert adapter.hard_text_limit == 600
-    assert adapter.synthesize("中" * 501).audio == b"audio"
+    with pytest.raises(TransientAlibabaError, match="missing_complete_audio_url"):
+        adapter.synthesize("中" * 501)
 
     over_limit_transport = FakeTransport(iter([tts_event(b"never")]))
     with pytest.raises(ValueError, match="600"):

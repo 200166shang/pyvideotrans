@@ -4,10 +4,9 @@ import hashlib
 import json
 import os
 import subprocess
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
-
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
@@ -76,7 +75,13 @@ class Mp3Finalizer:
                 path=output,
                 fingerprint=_sha256(output),
                 duration_ms=round(float(metadata["format"]["duration"]) * 1000),
-                bitrate_kbps=round(int(metadata["format"]["bit_rate"]) / 1000),
+                bitrate_kbps=round(
+                    int(
+                        metadata["streams"][0].get("bit_rate")
+                        or metadata["format"]["bit_rate"]
+                    )
+                    / 1000
+                ),
                 channels=int(metadata["streams"][0]["channels"]),
                 sample_rate_hz=int(metadata["streams"][0]["sample_rate"]),
             )
@@ -88,7 +93,8 @@ class Mp3Finalizer:
         result = self._runner(
             [
                 "ffprobe", "-v", "error", "-select_streams", "a:0",
-                "-show_entries", "stream=sample_rate,channels:format=duration,bit_rate",
+                "-show_entries",
+                "stream=sample_rate,channels,bit_rate:format=duration,bit_rate",
                 "-of", "json", str(path),
             ]
         )

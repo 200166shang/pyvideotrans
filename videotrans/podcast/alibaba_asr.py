@@ -11,11 +11,11 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
 
 MODEL = "qwen-audio-3.0-asr-flash-filetrans"
 RUNNING_STATUSES = frozenset({"PENDING", "RUNNING"})
@@ -563,7 +563,7 @@ def _decode_json(raw: bytes) -> Mapping[str, Any]:
 def _safe_error_payload(error: HTTPError) -> Mapping[str, Any]:
     try:
         return _decode_json(error.read())
-    except Exception:
+    except Exception:  # noqa: BLE001 - provider bodies are optional and untrusted
         return {}
 
 

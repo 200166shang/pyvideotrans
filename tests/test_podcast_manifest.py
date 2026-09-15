@@ -38,6 +38,13 @@ def test_finalize_moves_run_to_awaiting_review() -> None:
 
     assert manifest.run["status"] == "awaiting_review"
 
+    manifest.record_review("accepted")
+    manifest.record_review("accepted")
+    assert manifest.run["status"] == "accepted"
+
+    with pytest.raises(ManifestError, match="awaiting review"):
+        manifest.record_review("rejected")
+
 
 def make_manifest():
     return PodcastManifest.create(
@@ -234,7 +241,5 @@ def test_only_one_run_lock_can_be_held(tmp_path):
     first = ManifestStore(path, lock_timeout=0)
     second = ManifestStore(path, lock_timeout=0)
 
-    with first.run_lock():
-        with pytest.raises(Timeout):
-            with second.run_lock():
-                pass
+    with first.run_lock(), pytest.raises(Timeout), second.run_lock():
+        pass

@@ -13,11 +13,11 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any
 
 from filelock import FileLock
-
 
 MANIFEST_VERSION = 1
 MANIFEST_SCHEMA = "pyvideotrans.podcast.production-run"
@@ -146,9 +146,12 @@ def _artifact(
         if relative.is_absolute() or ".." in relative.parts:
             raise ManifestError("artifact path must remain inside the production run directory")
         path = relative.as_posix()
-    if size_bytes is not None:
-        if not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or size_bytes < 0:
-            raise ManifestError("artifact size must be a non-negative integer")
+    if size_bytes is not None and (
+        not isinstance(size_bytes, int)
+        or isinstance(size_bytes, bool)
+        or size_bytes < 0
+    ):
+        raise ManifestError("artifact size must be a non-negative integer")
     return {"identity": identity, "path": path, "size_bytes": size_bytes}
 
 
@@ -196,7 +199,7 @@ class PodcastManifest:
         source: Any,
         profile: Mapping[str, Any],
         chunk_sources: Mapping[str, Sequence[Any]] | None = None,
-    ) -> "PodcastManifest":
+    ) -> PodcastManifest:
         """Create a pending production run.
 
         ``source``, ``profile``, and chunk source values contribute only to
@@ -240,7 +243,7 @@ class PodcastManifest:
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "PodcastManifest":
+    def from_dict(cls, data: Mapping[str, Any]) -> PodcastManifest:
         return cls(data)
 
     @property
@@ -438,9 +441,7 @@ class PodcastManifest:
             if stage["status"] != "completed":
                 if name == "asr" and stage["task_id"]:
                     stage["status"] = "in_flight"
-                elif stage["status"] == "in_flight":
-                    stage["status"] = "pending"
-                elif name in CHUNKED_STAGES and any(
+                elif stage["status"] == "in_flight" or name in CHUNKED_STAGES and any(
                     chunk["status"] == "pending" for chunk in stage["chunks"]
                 ):
                     stage["status"] = "pending"
@@ -454,6 +455,20 @@ class PodcastManifest:
                 else None
             )
         self.run["resume_count"] += 1
+        self._changed()
+
+    def record_review(self, status: str) -> None:
+        """Record the listener-owned terminal quality decision."""
+
+        if status not in {"accepted", "rejected"}:
+            raise ManifestError("review status must be accepted or rejected")
+        current = self.run["status"]
+        if current == status:
+            return
+        if current != "awaiting_review":
+            raise ManifestError("only a run awaiting review can be reviewed")
+        self.run["status"] = status
+        self.run["active_stage"] = None
         self._changed()
 
     def _chunk(self, stage_name: str, chunk_id: str) -> dict[str, Any]:
@@ -596,7 +611,7 @@ def atomic_write_json(path: str | os.PathLike[str], data: Mapping[str, Any]) -> 
             os.fsync(handle.fileno())
         os.replace(temporary, target)
         _fsync_directory(target.parent)
-    except BaseException:
+    except BaseException:  # noqa: BLE001 - cleanup must also run on interruption
         try:
             temporary.unlink(missing_ok=True)
         finally:

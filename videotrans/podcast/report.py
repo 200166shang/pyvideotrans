@@ -20,7 +20,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-
 SCHEMA_VERSION = "1.0"
 STAGE_ORDER = ("prepare", "asr", "translate", "tts", "finalize")
 
@@ -193,7 +192,7 @@ def public_list_price_total(
     if not isinstance(usage, Mapping) or not isinstance(prices, Mapping):
         raise TypeError("usage and prices must be mappings")
 
-    total = Decimal("0")
+    total = Decimal(0)
     for metric, raw_usage in usage.items():
         if not isinstance(metric, str) or not metric:
             raise TypeError("usage metric names must be non-empty strings")
@@ -216,7 +215,7 @@ def public_list_price_total(
             )
         else:
             price = _decimal_number(price_spec, f"price[{metric!r}]")
-            per_units = Decimal("1")
+            per_units = Decimal(1)
         if price < 0:
             raise ValueError(f"price[{metric!r}] must be non-negative")
         if per_units <= 0:
@@ -234,8 +233,8 @@ def make_chunk(
     retries: int = 0,
     elapsed_ms: int = 0,
     cache_hit: bool = False,
-    cost_confirmed_cny: int | float | Decimal = 0,
-    cost_unconfirmed_cny: int | float | Decimal = 0,
+    cost_confirmed_cny: float | Decimal = 0,
+    cost_unconfirmed_cny: float | Decimal = 0,
     artifact_fingerprint: str | None = None,
     error_code: str | None = None,
 ) -> dict[str, Any]:
@@ -266,8 +265,8 @@ def make_stage(
     retries: int = 0,
     elapsed_ms: int = 0,
     cache_hit: bool = False,
-    cost_confirmed_cny: int | float | Decimal = 0,
-    cost_unconfirmed_cny: int | float | Decimal = 0,
+    cost_confirmed_cny: float | Decimal = 0,
+    cost_unconfirmed_cny: float | Decimal = 0,
     chunks: Sequence[Mapping[str, Any]] = (),
     artifact_fingerprint: str | None = None,
     error_code: str | None = None,
@@ -307,11 +306,11 @@ def calculate_totals(
     _non_negative_int(wall_clock_ms, "wall_clock_ms")
     confirmed = sum(
         (_decimal_number(stage["cost_confirmed_cny"], "cost") for stage in stages),
-        Decimal("0"),
+        Decimal(0),
     )
     unconfirmed = sum(
         (_decimal_number(stage["cost_unconfirmed_cny"], "cost") for stage in stages),
-        Decimal("0"),
+        Decimal(0),
     )
     return {
         "wall_clock_ms": wall_clock_ms,

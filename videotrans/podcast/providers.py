@@ -8,20 +8,23 @@ persisted provider settings at runtime.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 from urllib.request import urlopen
 
 from videotrans.podcast.alibaba_asr import (
     MODEL as ASR_MODEL,
+)
+from videotrans.podcast.alibaba_asr import (
     AlibabaAsrHttpTransport,
     AlibabaWholeFileAsrClient,
 )
 from videotrans.podcast.alibaba_text import (
     BEIJING_ENDPOINT,
-    AlibabaTTSAdapter,
     AlibabaTranslationAdapter,
+    AlibabaTTSAdapter,
 )
 from videotrans.podcast.profiles import ALIBABA_PODCAST_V1, PodcastProfile
 
@@ -163,7 +166,7 @@ class _AlibabaAudioUploader:
                 audio_path.resolve().as_uri(),
                 self._api_key,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - never leak SDK errors containing credentials
             raise AlibabaAudioUploadError(
                 "Alibaba temporary audio upload failed; verify the API key, "
                 "workspace, region, and network connection."

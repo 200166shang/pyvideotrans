@@ -11,6 +11,7 @@ def test_default_profile_is_pinned_and_uses_andre() -> None:
     assert profile.translation_model == "qwen-mt-flash"
     assert profile.tts_model == "qwen3-tts-flash-2025-11-27"
     assert profile.voice == "Andre"
+    assert profile.translation_rpm == 60
     assert profile.tts_concurrency == 4
     assert profile.tts_rpm == 150
     assert len(profile.fingerprint) == 64

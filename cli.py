@@ -337,10 +337,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Resume a podcast run from its run directory")
     parser.add_argument('--podcast-profile', type=str, default='alibaba-podcast-v1',
                         help="Podcast production profile")
-    parser.add_argument('--cache-mode', choices=['cold', 'warm'], default='cold',
+    parser.add_argument('--cache-mode', choices=['cold'], default='cold',
                         help="Podcast benchmark cache mode")
     parser.add_argument('--report', type=str, default=None,
                         help="Podcast production report path")
+    parser.add_argument('--review', choices=['accepted', 'rejected'], default=None,
+                        help="Record the listener review for a completed podcast run")
+    parser.add_argument('--review-note', type=str, default=None,
+                        help="Optional short listener review note")
 
     parser.add_argument('--list', type=str, choices=['providers', 'languages', 'models'],
                         help=tr("help_list"))
@@ -397,6 +401,10 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 def validate_task_params(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Validate required parameters for the given task type."""
+    if getattr(args, 'review', None) and not getattr(args, 'resume', None):
+        parser.error("--review requires --resume")
+    if getattr(args, 'review_note', None) and not getattr(args, 'review', None):
+        parser.error("--review-note requires --review")
     if args.task in ('podcast', 'benchmark') and getattr(args, 'resume', None):
         if args.name:
             parser.error("--name and --resume cannot be used together")

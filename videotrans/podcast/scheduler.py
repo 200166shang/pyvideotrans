@@ -8,7 +8,6 @@ import time
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Generic, TypeVar
 
-
 ItemT = TypeVar("ItemT")
 ResultT = TypeVar("ResultT")
 

@@ -19,7 +19,7 @@ def test_token_estimate_is_deterministic_and_language_aware():
     assert estimate_token_units("abcdefgh") == 2
 
 
-def test_translation_chunks_avoid_unnecessary_speaker_crossing():
+def test_translation_chunks_never_cross_speaker_turns():
     rows = [
         {"id": 1, "speaker": "a", "text": "a" * 300},
         {"id": 2, "speaker": "a", "text": "b" * 300},
@@ -31,11 +31,11 @@ def test_translation_chunks_avoid_unnecessary_speaker_crossing():
 
     assert [chunk.row_sequence_ids for chunk in chunks] == [
         ("1", "2"),
-        ("3", "4"),
+        ("3",),
+        ("4",),
     ]
     assert chunks[0].speaker_ids == ("a",)
-    # Crossing is useful here because speaker b alone is below the 600 target.
-    assert chunks[1].speaker_ids == ("b", "c")
+    assert chunks[1].speaker_ids == ("b",)
     assert all(chunk.token_estimate <= 1_000 for chunk in chunks)
 
 
@@ -54,6 +54,20 @@ def test_translation_chunks_split_at_max_and_have_stable_ids():
     ]
     assert all(chunk.token_estimate <= 1_000 for chunk in first)
     assert first[0].rows[0].sequence_id.startswith("row-a.part-")
+
+
+def test_translation_chunks_use_minimum_as_same_turn_packing_target():
+    rows = [
+        PodcastTextRow(f"row-{index}", str(index) * 300, "host")
+        for index in range(1, 5)
+    ]
+
+    chunks = chunk_translation_rows(rows, token_estimator=len)
+
+    assert [chunk.row_sequence_ids for chunk in chunks] == [
+        ("row-1", "row-2"),
+        ("row-3", "row-4"),
+    ]
 
 
 def test_tts_coalesces_same_speaker_and_always_uses_andre():
