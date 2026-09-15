@@ -19,7 +19,7 @@ from typing import Any
 
 from filelock import FileLock
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 MANIFEST_SCHEMA = "pyvideotrans.podcast.production-run"
 
 STAGE_NAMES = ("prepare", "asr", "translate", "tts", "finalize")
@@ -38,16 +38,44 @@ RUN_STATUSES = frozenset(
     )
 )
 STAGE_STATUSES = frozenset(("pending", "in_flight", "completed", "failed"))
-CHUNK_STATUSES = frozenset(("pending", "in_flight", "committed", "failed"))
+CHUNK_STATUSES = frozenset(("pending", "submission_uncertain", "committed", "failed"))
+PLAN_STATUSES = frozenset(("open", "sealed"))
 
 _SHA256_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RUN_KEYS = frozenset(
-    ("identity", "status", "input_identity", "profile_identity", "active_stage", "resume_count")
+    (
+        "identity",
+        "status",
+        "input_identity",
+        "profile_identity",
+        "active_stages",
+        "resume_count",
+    )
 )
 _STAGE_KEYS = frozenset(
-    ("identity", "name", "status", "attempts", "retries", "artifact", "task_id", "chunks")
+    (
+        "identity",
+        "name",
+        "status",
+        "attempts",
+        "retries",
+        "artifact",
+        "task_id",
+        "plan_status",
+        "chunks",
+    )
 )
-_CHUNK_KEYS = frozenset(("identity", "index", "status", "attempts", "retries", "artifact"))
+_CHUNK_KEYS = frozenset(
+    (
+        "identity",
+        "index",
+        "status",
+        "attempts",
+        "retries",
+        "attempt_identity",
+        "artifact",
+    )
+)
 _ARTIFACT_KEYS = frozenset(("identity", "path", "size_bytes"))
 _ROOT_KEYS = frozenset(("schema", "manifest_version", "revision", "run", "stages"))
 
@@ -95,7 +123,7 @@ def profile_identity(profile: Mapping[str, Any]) -> str:
 
     if not isinstance(profile, Mapping):
         raise ManifestError("profile must be a mapping")
-    return sha256_identity("podcast-profile-v1", profile)
+    return sha256_identity("podcast-profile-v2", profile)
 
 
 def stage_identity(run_identity: str, stage_name: str) -> str:
@@ -104,7 +132,7 @@ def stage_identity(run_identity: str, stage_name: str) -> str:
     _require_identity(run_identity, "run identity")
     _require_stage_name(stage_name)
     return sha256_identity(
-        "podcast-stage-v1",
+        "podcast-stage-v2",
         {"run_identity": run_identity, "stage": stage_name},
     )
 
@@ -116,7 +144,7 @@ def chunk_identity(stage_id: str, index: int, source: Any) -> str:
     if not isinstance(index, int) or isinstance(index, bool) or index < 0:
         raise ManifestError("chunk index must be a non-negative integer")
     return sha256_identity(
-        "podcast-chunk-v1",
+        "podcast-chunk-v2",
         {"stage_identity": stage_id, "index": index, "source": source},
     )
 
@@ -144,7 +172,9 @@ def _artifact(
             raise ManifestError("artifact path must be a non-empty relative path")
         relative = PurePosixPath(path.replace("\\", "/"))
         if relative.is_absolute() or ".." in relative.parts:
-            raise ManifestError("artifact path must remain inside the production run directory")
+            raise ManifestError(
+                "artifact path must remain inside the production run directory"
+            )
         path = relative.as_posix()
     if size_bytes is not None and (
         not isinstance(size_bytes, int)
@@ -162,6 +192,7 @@ def _new_chunk(stage_id: str, index: int, source: Any) -> dict[str, Any]:
         "status": "pending",
         "attempts": 0,
         "retries": 0,
+        "attempt_identity": None,
         "artifact": None,
     }
 
@@ -176,7 +207,16 @@ def _new_stage(run_id: str, name: str, sources: Sequence[Any]) -> dict[str, Any]
         "retries": 0,
         "artifact": None,
         "task_id": None,
-        "chunks": [_new_chunk(identity, index, source) for index, source in enumerate(sources)],
+        "plan_status": (
+            "sealed"
+            if name in CHUNKED_STAGES and sources
+            else "open"
+            if name in CHUNKED_STAGES
+            else None
+        ),
+        "chunks": [
+            _new_chunk(identity, index, source) for index, source in enumerate(sources)
+        ],
     }
 
 
@@ -209,12 +249,14 @@ class PodcastManifest:
         chunks = dict(chunk_sources or {})
         unknown = set(chunks) - CHUNKED_STAGES
         if unknown:
-            raise ManifestError(f"chunks are only supported for: {sorted(CHUNKED_STAGES)}")
+            raise ManifestError(
+                f"chunks are only supported for: {sorted(CHUNKED_STAGES)}"
+            )
 
-        input_id = sha256_identity("podcast-source-v1", source)
+        input_id = sha256_identity("podcast-source-v2", source)
         profile_id = profile_identity(profile)
         run_id = sha256_identity(
-            "podcast-run-v1",
+            "podcast-run-v2",
             {
                 "input_identity": input_id,
                 "profile_identity": profile_id,
@@ -222,8 +264,7 @@ class PodcastManifest:
             },
         )
         stages = {
-            name: _new_stage(run_id, name, chunks.get(name, ()))
-            for name in STAGE_NAMES
+            name: _new_stage(run_id, name, chunks.get(name, ())) for name in STAGE_NAMES
         }
         return cls(
             {
@@ -235,7 +276,7 @@ class PodcastManifest:
                     "status": "pending",
                     "input_identity": input_id,
                     "profile_identity": profile_id,
-                    "active_stage": None,
+                    "active_stages": [],
                     "resume_count": 0,
                 },
                 "stages": stages,
@@ -289,7 +330,7 @@ class PodcastManifest:
         stage["status"] = "in_flight"
         stage["attempts"] += 1
         self.run["status"] = "running"
-        self.run["active_stage"] = name
+        self._activate_stage(name)
         self._changed()
 
     def fail_stage(self, name: str) -> None:
@@ -299,7 +340,7 @@ class PodcastManifest:
         stage["status"] = "failed"
         stage["retries"] += 1
         self.run["status"] = "needs_attention"
-        self.run["active_stage"] = name
+        self._activate_stage(name)
         self._changed()
 
     def set_asr_task_id(self, task_id: str) -> None:
@@ -315,20 +356,29 @@ class PodcastManifest:
         asr["task_id"] = task_id
         asr["status"] = "in_flight"
         self.run["status"] = "running"
-        self.run["active_stage"] = "asr"
+        self._activate_stage("asr")
         self._changed()
 
-    def start_chunk(self, stage_name: str, chunk_id: str) -> None:
+    def start_chunk(self, stage_name: str, chunk_id: str) -> str:
+        """Durably mark a new provider attempt as submission-uncertain."""
+
         chunk = self._chunk(stage_name, chunk_id)
-        if chunk["status"] == "committed":
-            raise ManifestError("a committed chunk cannot be restarted")
-        chunk["status"] = "in_flight"
+        if chunk["status"] != "pending":
+            raise ManifestError("only a pending chunk can start a provider attempt")
+        attempt_number = chunk["attempts"] + 1
+        attempt_identity = sha256_identity(
+            "podcast-provider-attempt-v2",
+            {"chunk_identity": chunk_id, "attempt": attempt_number},
+        )
+        chunk["status"] = "submission_uncertain"
         chunk["attempts"] += 1
+        chunk["attempt_identity"] = attempt_identity
         stage = self.stage(stage_name)
         stage["status"] = "in_flight"
         self.run["status"] = "running"
-        self.run["active_stage"] = stage_name
+        self._activate_stage(stage_name)
         self._changed()
+        return attempt_identity
 
     def define_chunks(self, stage_name: str, sources: Sequence[Any]) -> None:
         """Define a chunked stage exactly once before any chunk is started.
@@ -350,21 +400,60 @@ class PodcastManifest:
                 chunk["identity"] for chunk in proposed
             ]:
                 raise ManifestError("chunk identities cannot change after definition")
+            if stage["plan_status"] != "sealed":
+                raise ManifestError("an existing chunk plan must be sealed")
             return
         if stage["status"] != "pending":
             raise ManifestError("chunks must be defined before their stage starts")
         stage["chunks"] = proposed
+        stage["plan_status"] = "sealed"
+        self._changed()
+
+    def append_chunk(self, stage_name: str, source: Any) -> dict[str, Any]:
+        """Append one final chunk to an open dynamic plan."""
+
+        if stage_name not in CHUNKED_STAGES:
+            raise ManifestError("only translate and tts stages contain chunks")
+        stage = self.stage(stage_name)
+        if stage["plan_status"] != "open":
+            raise ManifestError("chunks can only be appended to an open plan")
+        if stage["status"] == "completed":
+            raise ManifestError("a completed stage cannot append chunks")
+        item = _new_chunk(stage["identity"], len(stage["chunks"]), source)
+        stage["chunks"].append(item)
+        self._changed()
+        return copy.deepcopy(item)
+
+    def seal_chunks(self, stage_name: str) -> None:
+        """Seal an append-only plan after its final chunk has been defined."""
+
+        if stage_name not in CHUNKED_STAGES:
+            raise ManifestError("only translate and tts stages contain chunks")
+        stage = self.stage(stage_name)
+        if stage["plan_status"] == "sealed":
+            return
+        stage["plan_status"] = "sealed"
+        self._changed()
+
+    def retry_chunk(self, stage_name: str, chunk_id: str) -> None:
+        """Record an explicit no-success response that is safe to retry."""
+
+        chunk = self._chunk(stage_name, chunk_id)
+        if chunk["status"] != "submission_uncertain":
+            raise ManifestError("only an uncertain submission can become retryable")
+        chunk["status"] = "pending"
+        chunk["retries"] += 1
+        chunk["attempt_identity"] = None
         self._changed()
 
     def fail_chunk(self, stage_name: str, chunk_id: str) -> None:
         chunk = self._chunk(stage_name, chunk_id)
-        if chunk["status"] == "committed":
-            raise ManifestError("a committed chunk cannot be failed")
+        if chunk["status"] != "submission_uncertain":
+            raise ManifestError("only an uncertain submission can fail")
         chunk["status"] = "failed"
-        chunk["retries"] += 1
         self.stage(stage_name)["status"] = "failed"
         self.run["status"] = "needs_attention"
-        self.run["active_stage"] = stage_name
+        self._activate_stage(stage_name)
         self._changed()
 
     def commit_chunk(
@@ -384,10 +473,16 @@ class PodcastManifest:
             if chunk["artifact"] != artifact:
                 raise ManifestError("a committed chunk artifact cannot be replaced")
             return
+        if chunk["status"] != "submission_uncertain":
+            raise ManifestError("only an uncertain submission can commit")
         chunk["artifact"] = artifact
         chunk["status"] = "committed"
         stage = self.stage(stage_name)
-        if stage["chunks"] and all(item["status"] == "committed" for item in stage["chunks"]):
+        if (
+            stage["plan_status"] == "sealed"
+            and stage["chunks"]
+            and all(item["status"] == "committed" for item in stage["chunks"])
+        ):
             stage["status"] = "completed"
         self._changed()
 
@@ -406,26 +501,28 @@ class PodcastManifest:
         if stage["status"] == "completed":
             if stage["artifact"] is None and name in CHUNKED_STAGES:
                 stage["artifact"] = artifact
+                self._deactivate_stage(name)
                 self._changed()
                 return
             if stage["artifact"] != artifact:
                 raise ManifestError("a committed stage artifact cannot be replaced")
             return
-        if name in CHUNKED_STAGES and any(
-            chunk["status"] != "committed" for chunk in stage["chunks"]
-        ):
-            raise ManifestError("all chunks must be committed before their stage")
+        if name in CHUNKED_STAGES:
+            if stage["plan_status"] != "sealed":
+                raise ManifestError("a chunked stage plan must be sealed before commit")
+            if any(chunk["status"] != "committed" for chunk in stage["chunks"]):
+                raise ManifestError("all chunks must be committed before their stage")
         stage["artifact"] = artifact
         stage["status"] = "completed"
         if name == "finalize":
             self.run["status"] = "awaiting_review"
-            self.run["active_stage"] = None
-        elif self.run["active_stage"] == name:
-            self.run["active_stage"] = None
+            self.run["active_stages"] = []
+        else:
+            self._deactivate_stage(name)
         self._changed()
 
     def normalize_for_resume(self) -> None:
-        """Make interrupted local/chunk work retryable without losing commits.
+        """Normalize retry-safe local work without resubmitting uncertain work.
 
         The ASR stage remains in flight when it has a task id, because that id
         represents an already-submitted remote operation that should be polled,
@@ -436,24 +533,41 @@ class PodcastManifest:
         for name in STAGE_NAMES:
             stage = self.stage(name)
             for chunk in stage["chunks"]:
-                if chunk["status"] == "in_flight":
+                if chunk["status"] == "failed":
                     chunk["status"] = "pending"
+                    chunk["attempt_identity"] = None
             if stage["status"] != "completed":
                 if name == "asr" and stage["task_id"]:
                     stage["status"] = "in_flight"
-                elif stage["status"] == "in_flight" or name in CHUNKED_STAGES and any(
-                    chunk["status"] == "pending" for chunk in stage["chunks"]
+                elif any(
+                    chunk["status"] == "submission_uncertain"
+                    for chunk in stage["chunks"]
+                ):
+                    stage["status"] = "failed"
+                elif stage["status"] == "in_flight" or (
+                    name in CHUNKED_STAGES
+                    and any(chunk["status"] == "pending" for chunk in stage["chunks"])
                 ):
                     stage["status"] = "pending"
 
         if not terminal_run:
-            self.run["status"] = "interrupted"
-            self.run["active_stage"] = (
-                "asr"
-                if self.stage("asr")["task_id"]
-                and self.stage("asr")["status"] != "completed"
-                else None
+            uncertain_stages = [
+                name
+                for name in CHUNKED_STAGES
+                if any(
+                    chunk["status"] == "submission_uncertain"
+                    for chunk in self.stage(name)["chunks"]
+                )
+            ]
+            self.run["status"] = (
+                "needs_attention" if uncertain_stages else "interrupted"
             )
+            self.run["active_stages"] = uncertain_stages
+            if (
+                self.stage("asr")["task_id"]
+                and self.stage("asr")["status"] != "completed"
+            ):
+                self._activate_stage("asr")
         self.run["resume_count"] += 1
         self._changed()
 
@@ -468,8 +582,28 @@ class PodcastManifest:
         if current != "awaiting_review":
             raise ManifestError("only a run awaiting review can be reviewed")
         self.run["status"] = status
-        self.run["active_stage"] = None
+        self.run["active_stages"] = []
         self._changed()
+
+    def uncertain_chunks(self) -> list[tuple[str, dict[str, Any]]]:
+        """Return privacy-safe copies of requests that must not be resent."""
+
+        return [
+            (stage_name, copy.deepcopy(chunk))
+            for stage_name in CHUNKED_STAGES
+            for chunk in self.stage(stage_name)["chunks"]
+            if chunk["status"] == "submission_uncertain"
+        ]
+
+    def _activate_stage(self, name: str) -> None:
+        _require_stage_name(name)
+        if name not in self.run["active_stages"]:
+            self.run["active_stages"].append(name)
+            self.run["active_stages"].sort(key=STAGE_NAMES.index)
+
+    def _deactivate_stage(self, name: str) -> None:
+        if name in self.run["active_stages"]:
+            self.run["active_stages"].remove(name)
 
     def _chunk(self, stage_name: str, chunk_id: str) -> dict[str, Any]:
         if stage_name not in CHUNKED_STAGES:
@@ -494,7 +628,11 @@ class PodcastManifest:
             raise UnsupportedManifestVersion(
                 f"unsupported manifest version: {data.get('manifest_version')!r}"
             )
-        if not isinstance(data.get("revision"), int) or isinstance(data["revision"], bool) or data["revision"] < 0:
+        if (
+            not isinstance(data.get("revision"), int)
+            or isinstance(data["revision"], bool)
+            or data["revision"] < 0
+        ):
             raise ManifestError("revision must be a non-negative integer")
 
         run = data.get("run")
@@ -504,7 +642,7 @@ class PodcastManifest:
         _require_identity(run["input_identity"], "input identity")
         _require_identity(run["profile_identity"], "profile identity")
         expected_run_identity = sha256_identity(
-            "podcast-run-v1",
+            "podcast-run-v2",
             {
                 "input_identity": run["input_identity"],
                 "profile_identity": run["profile_identity"],
@@ -512,12 +650,25 @@ class PodcastManifest:
             },
         )
         if run["identity"] != expected_run_identity:
-            raise ManifestError("run identity does not match its input and profile identities")
+            raise ManifestError(
+                "run identity does not match its input and profile identities"
+            )
         if run["status"] not in RUN_STATUSES:
             raise ManifestError(f"invalid run status: {run['status']!r}")
-        if run["active_stage"] is not None:
-            _require_stage_name(run["active_stage"])
-        if not isinstance(run["resume_count"], int) or isinstance(run["resume_count"], bool) or run["resume_count"] < 0:
+        active_stages = run["active_stages"]
+        if not isinstance(active_stages, list) or len(active_stages) != len(
+            set(active_stages)
+        ):
+            raise ManifestError("active_stages must be unique and pipeline ordered")
+        for active_stage in active_stages:
+            _require_stage_name(active_stage)
+        if active_stages != sorted(active_stages, key=STAGE_NAMES.index):
+            raise ManifestError("active_stages must be unique and pipeline ordered")
+        if (
+            not isinstance(run["resume_count"], int)
+            or isinstance(run["resume_count"], bool)
+            or run["resume_count"] < 0
+        ):
             raise ManifestError("resume_count must be a non-negative integer")
 
         stages = data.get("stages")
@@ -537,9 +688,18 @@ class PodcastManifest:
         if stage["status"] not in STAGE_STATUSES:
             raise ManifestError(f"invalid stage status: {stage['status']!r}")
         for counter in ("attempts", "retries"):
-            if not isinstance(stage[counter], int) or isinstance(stage[counter], bool) or stage[counter] < 0:
+            if (
+                not isinstance(stage[counter], int)
+                or isinstance(stage[counter], bool)
+                or stage[counter] < 0
+            ):
                 raise ManifestError(f"stage {counter} must be a non-negative integer")
         self._validate_artifact(stage["artifact"])
+        if name in CHUNKED_STAGES:
+            if stage["plan_status"] not in PLAN_STATUSES:
+                raise ManifestError("chunked stage plan_status is invalid")
+        elif stage["plan_status"] is not None:
+            raise ManifestError("only chunked stages have a plan_status")
         if name == "asr":
             if stage["task_id"] is not None and (
                 not isinstance(stage["task_id"], str) or not stage["task_id"].strip()
@@ -570,11 +730,41 @@ class PodcastManifest:
         if chunk["status"] not in CHUNK_STATUSES:
             raise ManifestError(f"invalid chunk status: {chunk['status']!r}")
         for counter in ("attempts", "retries"):
-            if not isinstance(chunk[counter], int) or isinstance(chunk[counter], bool) or chunk[counter] < 0:
+            if (
+                not isinstance(chunk[counter], int)
+                or isinstance(chunk[counter], bool)
+                or chunk[counter] < 0
+            ):
                 raise ManifestError(f"chunk {counter} must be a non-negative integer")
         PodcastManifest._validate_artifact(chunk["artifact"])
+        if chunk["attempt_identity"] is not None:
+            _require_identity(chunk["attempt_identity"], "attempt identity")
+            expected_attempt_identity = sha256_identity(
+                "podcast-provider-attempt-v2",
+                {
+                    "chunk_identity": chunk["identity"],
+                    "attempt": chunk["attempts"],
+                },
+            )
+            if chunk["attempt_identity"] != expected_attempt_identity:
+                raise ManifestError("chunk attempt identity is invalid")
+        if chunk["status"] == "pending" and chunk["attempt_identity"] is not None:
+            raise ManifestError("a pending chunk cannot retain an attempt identity")
+        if chunk["status"] != "pending" and chunk["attempt_identity"] is None:
+            raise ManifestError("a started chunk must retain its attempt identity")
+        if chunk["attempts"] == 0 and chunk["attempt_identity"] is not None:
+            raise ManifestError("an unattempted chunk cannot have an attempt identity")
+        if chunk["retries"] > chunk["attempts"]:
+            raise ManifestError("chunk retries cannot exceed attempts")
         if chunk["status"] == "committed" and chunk["artifact"] is None:
             raise ManifestError("a committed chunk must reference its artifact")
+        if chunk["status"] != "committed" and chunk["artifact"] is not None:
+            raise ManifestError("only a committed chunk can reference an artifact")
+        if (
+            chunk["status"] == "submission_uncertain"
+            and chunk["attempt_identity"] is None
+        ):
+            raise ManifestError("an uncertain chunk must retain its attempt identity")
 
     @staticmethod
     def _validate_artifact(artifact: Any) -> None:
@@ -582,7 +772,9 @@ class PodcastManifest:
             return
         if not isinstance(artifact, dict) or set(artifact) != _ARTIFACT_KEYS:
             raise ManifestError("artifact contains unknown or missing fields")
-        expected = _artifact(artifact["identity"], artifact["path"], artifact["size_bytes"])
+        expected = _artifact(
+            artifact["identity"], artifact["path"], artifact["size_bytes"]
+        )
         if artifact != expected:
             raise ManifestError("artifact is not in canonical form")
 
@@ -666,7 +858,9 @@ class ManifestStore:
             return manifest
 
 
-def iter_pending_chunks(manifest: PodcastManifest, stage_name: str) -> Iterator[dict[str, Any]]:
+def iter_pending_chunks(
+    manifest: PodcastManifest, stage_name: str
+) -> Iterator[dict[str, Any]]:
     """Yield copies of chunks that are safe to submit."""
 
     if stage_name not in CHUNKED_STAGES:

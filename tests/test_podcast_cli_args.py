@@ -11,14 +11,19 @@ def test_parser_accepts_podcast_profile_and_report(tmp_path: Path) -> None:
     parser = build_parser()
     args = parser.parse_args(
         [
-            "--task", "podcast", "--name", str(source),
-            "--podcast-profile", "alibaba-podcast-v1",
-            "--report", str(tmp_path / "report.json"),
+            "--task",
+            "podcast",
+            "--name",
+            str(source),
+            "--podcast-profile",
+            "alibaba-podcast-v2",
+            "--report",
+            str(tmp_path / "report.json"),
         ]
     )
 
     validate_task_params(args, parser)
-    assert args.podcast_profile == "alibaba-podcast-v1"
+    assert args.podcast_profile == "alibaba-podcast-v2"
     assert args.cache_mode == "cold"
 
 

@@ -28,12 +28,14 @@ class PodcastProfile:
 
     @property
     def fingerprint(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        payload = json.dumps(
+            asdict(self), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-ALIBABA_PODCAST_V1 = PodcastProfile(
-    id="alibaba-podcast-v1",
+ALIBABA_PODCAST_V2 = PodcastProfile(
+    id="alibaba-podcast-v2",
     region="cn-beijing",
     source_language="en",
     target_language="zh-cn",
@@ -54,7 +56,7 @@ ALIBABA_PODCAST_V1 = PodcastProfile(
 )
 
 
-_PROFILES = {ALIBABA_PODCAST_V1.id: ALIBABA_PODCAST_V1}
+_PROFILES = {ALIBABA_PODCAST_V2.id: ALIBABA_PODCAST_V2}
 
 
 def get_profile(profile_id: str) -> PodcastProfile:

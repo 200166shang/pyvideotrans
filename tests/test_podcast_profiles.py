@@ -1,12 +1,12 @@
 import pytest
 
-from videotrans.podcast.profiles import ALIBABA_PODCAST_V1, get_profile
+from videotrans.podcast.profiles import ALIBABA_PODCAST_V2, get_profile
 
 
 def test_default_profile_is_pinned_and_uses_andre() -> None:
-    profile = get_profile("alibaba-podcast-v1")
+    profile = get_profile("alibaba-podcast-v2")
 
-    assert profile is ALIBABA_PODCAST_V1
+    assert profile is ALIBABA_PODCAST_V2
     assert profile.asr_model == "qwen-audio-3.0-asr-flash-filetrans"
     assert profile.translation_model == "qwen-mt-flash"
     assert profile.tts_model == "qwen3-tts-flash-2025-11-27"

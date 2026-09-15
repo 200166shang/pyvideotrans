@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from videotrans.podcast.cli_runner import _validate_benchmark_identity, run_from_args
+from videotrans.podcast.cli_runner import (
+    _validate_benchmark_identity,
+    _write_benchmark_summary_from_report,
+    run_from_args,
+)
 from videotrans.podcast.orchestrator import PodcastPipelineError, PodcastRunResult
 
 
@@ -36,7 +40,13 @@ def _result(run_directory: Path) -> PodcastRunResult:
         json.dumps(
             {
                 "run": {"id": "sha256:" + "a" * 64},
-                "totals": {"wall_clock_ms": 74_000},
+                "input": {"duration_ms": 300_000},
+                "totals": {
+                    "wall_clock_ms": 74_000,
+                    "timing_basis": "wall-clock",
+                    "cost_confirmed_cny": 0,
+                    "cost_unconfirmed_cny": 0.33,
+                },
                 "listening_quality_gate": {"status": "pending"},
             }
         ),
@@ -48,7 +58,7 @@ def _result(run_directory: Path) -> PodcastRunResult:
 def _args(tmp_path: Path, **changes):
     values = {
         "task": "podcast",
-        "podcast_profile": "alibaba-podcast-v1",
+        "podcast_profile": "alibaba-podcast-v2",
         "name": str(tmp_path / "source.m4a"),
         "output_dir": str(tmp_path / "run"),
         "resume": None,
@@ -62,7 +72,9 @@ def _args(tmp_path: Path, **changes):
 
 
 def test_cli_runner_creates_new_run(tmp_path, monkeypatch, capsys) -> None:
-    monkeypatch.setattr("videotrans.podcast.cli_runner.PodcastCoordinator", FakeCoordinator)
+    monkeypatch.setattr(
+        "videotrans.podcast.cli_runner.PodcastCoordinator", FakeCoordinator
+    )
     args = _args(tmp_path)
 
     assert run_from_args(args, runtime_factory=lambda _: object()) == 0
@@ -77,7 +89,9 @@ def test_cli_runner_creates_new_run(tmp_path, monkeypatch, capsys) -> None:
 
 
 def test_benchmark_writes_small_target_summary(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("videotrans.podcast.cli_runner.PodcastCoordinator", FakeCoordinator)
+    monkeypatch.setattr(
+        "videotrans.podcast.cli_runner.PodcastCoordinator", FakeCoordinator
+    )
     monkeypatch.setattr(
         "videotrans.podcast.cli_runner._validate_benchmark_identity", lambda *_: None
     )
@@ -97,12 +111,56 @@ def test_benchmark_writes_small_target_summary(tmp_path, monkeypatch) -> None:
     )
     assert summary["meets_first_release_target"] is True
     assert summary["meets_engineering_target"] is True
+    assert summary["meets_pipeline_overlap_target"] is False
+    assert summary["pipeline_overlap_target_ms"] == 45_000
+    assert summary["timing_basis"] == "wall-clock"
+    assert summary["uninterrupted_process"] is True
+    assert summary["estimated_cost_per_source_hour_cny"] == 3.96
+    assert summary["cost_watchline_per_source_hour_cny"] == 3.85
+    assert summary["exceeds_cost_watchline"] is True
     assert summary["fixed_sample_validated"] is True
 
 
+def test_resumed_active_process_timing_is_not_candidate_evidence(tmp_path) -> None:
+    run_dir = tmp_path / "resumed"
+    run_dir.mkdir()
+    report = run_dir / "production-report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "run": {"id": "sha256:" + "a" * 64},
+                "input": {"duration_ms": 300_000},
+                "totals": {
+                    "wall_clock_ms": 10_000,
+                    "timing_basis": "active-process",
+                    "cost_confirmed_cny": 0,
+                    "cost_unconfirmed_cny": 0.1,
+                },
+                "listening_quality_gate": {"status": "pending"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run.private.json").write_text(
+        json.dumps({"timing_basis": "active-process"}), encoding="utf-8"
+    )
+
+    destination = _write_benchmark_summary_from_report(run_dir, report)
+    summary = json.loads(destination.read_text(encoding="utf-8"))
+
+    assert summary["timing_basis"] == "active-process"
+    assert summary["uninterrupted_process"] is False
+    assert summary["meets_pipeline_overlap_target"] is False
+
+
 def test_cli_runner_resumes_without_source(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("videotrans.podcast.cli_runner.PodcastCoordinator", FakeCoordinator)
-    monkeypatch.setattr("videotrans.podcast.cli_runner.load_terminal_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "videotrans.podcast.cli_runner.PodcastCoordinator", FakeCoordinator
+    )
+    monkeypatch.setattr(
+        "videotrans.podcast.cli_runner.load_terminal_run",
+        lambda *_args, **_kwargs: None,
+    )
     run_dir = tmp_path / "existing"
     args = _args(tmp_path, name=None, output_dir=None, resume=str(run_dir))
 
@@ -115,10 +173,10 @@ def test_review_does_not_construct_cloud_runtime(tmp_path, monkeypatch) -> None:
     called = []
     monkeypatch.setattr(
         "videotrans.podcast.cli_runner._record_review",
-        lambda run_directory, status, *, profile, note, report_path: called.append(
-            (run_directory, status, profile.id, note, report_path)
-        )
-        or tmp_path / "report.json",
+        lambda run_directory, status, *, profile, note, report_path: (
+            called.append((run_directory, status, profile.id, note, report_path))
+            or tmp_path / "report.json"
+        ),
     )
     args = _args(
         tmp_path,
@@ -129,16 +187,21 @@ def test_review_does_not_construct_cloud_runtime(tmp_path, monkeypatch) -> None:
         review_note="sounds natural",
     )
 
-    assert run_from_args(
-        args,
-        runtime_factory=lambda _: (_ for _ in ()).throw(AssertionError("cloud runtime")),
-    ) == 0
+    assert (
+        run_from_args(
+            args,
+            runtime_factory=lambda _: (_ for _ in ()).throw(
+                AssertionError("cloud runtime")
+            ),
+        )
+        == 0
+    )
 
     assert called == [
         (
             tmp_path / "run",
             "accepted",
-            "alibaba-podcast-v1",
+            "alibaba-podcast-v2",
             "sounds natural",
             None,
         )
@@ -183,18 +246,26 @@ def test_benchmark_review_validates_fixed_input_before_mutation(
         run_from_args(args, runtime_factory=lambda _: object())
 
 
-def test_terminal_resume_does_not_construct_cloud_runtime(tmp_path, monkeypatch) -> None:
+def test_terminal_resume_does_not_construct_cloud_runtime(
+    tmp_path, monkeypatch
+) -> None:
     run_dir = tmp_path / "accepted"
     result = _result(run_dir)
     result = PodcastRunResult(
         result.run_directory, result.output_path, result.report_path, "accepted"
     )
     monkeypatch.setattr(
-        "videotrans.podcast.cli_runner.load_terminal_run", lambda *_args, **_kwargs: result
+        "videotrans.podcast.cli_runner.load_terminal_run",
+        lambda *_args, **_kwargs: result,
     )
     args = _args(tmp_path, name=None, output_dir=None, resume=str(run_dir))
 
-    assert run_from_args(
-        args,
-        runtime_factory=lambda _: (_ for _ in ()).throw(AssertionError("cloud runtime")),
-    ) == 0
+    assert (
+        run_from_args(
+            args,
+            runtime_factory=lambda _: (_ for _ in ()).throw(
+                AssertionError("cloud runtime")
+            ),
+        )
+        == 0
+    )

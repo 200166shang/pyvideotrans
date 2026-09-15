@@ -106,13 +106,35 @@ def test_translation_accepts_object_shaped_dashscope_response():
 @pytest.mark.parametrize(
     ("response", "error_type", "retryable"),
     [
-        ({"status_code": 429, "code": "Throttling", "message": "secret prose"}, TransientAlibabaError, True),
-        ({"status_code": 503, "code": "ServiceUnavailable", "message": "secret prose"}, TransientAlibabaError, True),
-        ({"status_code": 401, "code": "InvalidApiKey", "message": "secret prose"}, PermanentAlibabaError, False),
-        ({"status_code": 400, "code": "BadRequest", "message": "secret prose"}, PermanentAlibabaError, False),
+        (
+            {"status_code": 429, "code": "Throttling", "message": "secret prose"},
+            TransientAlibabaError,
+            True,
+        ),
+        (
+            {
+                "status_code": 503,
+                "code": "ServiceUnavailable",
+                "message": "secret prose",
+            },
+            TransientAlibabaError,
+            True,
+        ),
+        (
+            {"status_code": 401, "code": "InvalidApiKey", "message": "secret prose"},
+            PermanentAlibabaError,
+            False,
+        ),
+        (
+            {"status_code": 400, "code": "BadRequest", "message": "secret prose"},
+            PermanentAlibabaError,
+            False,
+        ),
     ],
 )
-def test_translation_classifies_errors_without_response_text(response, error_type, retryable):
+def test_translation_classifies_errors_without_response_text(
+    response, error_type, retryable
+):
     response["request_id"] = "safe-id"
     with pytest.raises(error_type) as captured:
         AlibabaTranslationAdapter(FakeTransport(response)).translate("do not disclose")
@@ -133,8 +155,11 @@ def test_transport_timeout_is_transient_and_sanitized():
 
 def test_empty_translation_is_a_retryable_malformed_response():
     with pytest.raises(TransientAlibabaError) as captured:
-        AlibabaTranslationAdapter(FakeTransport(translation_response(text=""))).translate("source")
+        AlibabaTranslationAdapter(
+            FakeTransport(translation_response(text=""))
+        ).translate("source")
     assert captured.value.code == "invalid_translation_response"
+    assert captured.value.submission_may_have_succeeded is True
 
 
 def tts_event(data=None, url=None, usage=None, request_id="tts-request"):
@@ -205,7 +230,9 @@ def test_tts_downloads_final_url_when_stream_has_no_audio_data():
 
 def test_tts_prefers_complete_final_url_over_raw_streamed_chunks():
     downloaded = []
-    events = iter([tts_event(b"chunk"), tts_event(url="https://example.invalid/final.wav")])
+    events = iter(
+        [tts_event(b"chunk"), tts_event(url="https://example.invalid/final.wav")]
+    )
     result = AlibabaTTSAdapter(
         FakeTransport(events),
         downloader=lambda url: downloaded.append(url) or b"complete-wav",
@@ -246,6 +273,7 @@ def test_tts_requires_injected_downloader_for_url_response():
             FakeTransport(iter([tts_event(url="https://example.invalid/audio.wav")]))
         ).synthesize("中文")
     assert captured.value.code == "downloader_required"
+    assert captured.value.submission_may_have_succeeded is True
 
 
 def test_invalid_base64_audio_is_transient():
@@ -258,3 +286,22 @@ def test_invalid_base64_audio_is_transient():
         AlibabaTTSAdapter(FakeTransport(iter([event]))).synthesize("中文")
     assert captured.value.code == "invalid_audio_data"
     assert captured.value.request_id == "bad-audio"
+    assert captured.value.submission_may_have_succeeded is True
+
+
+def test_tts_stream_iteration_failure_is_marked_post_acceptance():
+    class StreamFailure(Exception):
+        status_code = 503
+
+    def events():
+        yield tts_event(b"partial", request_id="accepted-id")
+        raise StreamFailure("private response prose")
+
+    with pytest.raises(TransientAlibabaError) as captured:
+        AlibabaTTSAdapter(FakeTransport(events())).synthesize("private input")
+
+    assert captured.value.code == "tts_result_processing_failed"
+    assert captured.value.status_code == 503
+    assert captured.value.request_id == "accepted-id"
+    assert captured.value.submission_may_have_succeeded is True
+    assert "private" not in str(captured.value)

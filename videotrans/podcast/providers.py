@@ -26,7 +26,7 @@ from videotrans.podcast.alibaba_text import (
     AlibabaTranslationAdapter,
     AlibabaTTSAdapter,
 )
-from videotrans.podcast.profiles import ALIBABA_PODCAST_V1, PodcastProfile
+from videotrans.podcast.profiles import ALIBABA_PODCAST_V2, PodcastProfile
 
 
 class AlibabaRuntimeConfigurationError(RuntimeError):
@@ -56,7 +56,7 @@ class AlibabaPodcastProviders:
 
 def create_alibaba_podcast_providers(
     *,
-    profile: PodcastProfile = ALIBABA_PODCAST_V1,
+    profile: PodcastProfile = ALIBABA_PODCAST_V2,
     environ: Mapping[str, str] | None = None,
     params: Mapping[str, Any] | Any | None = None,
     dashscope_module: Any | None = None,

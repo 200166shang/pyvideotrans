@@ -27,8 +27,7 @@ TTS_HARD_TEXT_LIMIT = 600
 class DashScopeTransport(Protocol):
     """The only provider operation required by these adapters."""
 
-    def call(self, **kwargs: Any) -> Any:
-        ...
+    def call(self, **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -57,10 +56,12 @@ class AlibabaProviderError(RuntimeError):
         code: str = "provider_error",
         status_code: int | None = None,
         request_id: str | None = None,
+        submission_may_have_succeeded: bool = False,
     ) -> None:
         self.code = code
         self.status_code = status_code
         self.request_id = request_id
+        self.submission_may_have_succeeded = submission_may_have_succeeded
         fields = [self.classification, f"code={code}"]
         if status_code is not None:
             fields.append(f"status={status_code}")
@@ -178,7 +179,9 @@ def _safe_code(value: Any, fallback: str) -> str:
     return code
 
 
-def _provider_error(response: Any, fallback: str = "provider_error") -> AlibabaProviderError:
+def _provider_error(
+    response: Any, fallback: str = "provider_error"
+) -> AlibabaProviderError:
     status = _status_code(_value(response, "status_code"))
     code = _safe_code(_value(response, "code"), fallback)
     normalized = code.lower()
@@ -218,6 +221,23 @@ def _call(transport: DashScopeTransport | Callable[..., Any], **kwargs: Any) -> 
         raise _transport_failure(exc) from exc
 
 
+def _post_acceptance_error(
+    error: Exception, request_id: str | None
+) -> TransientAlibabaError:
+    """Sanitize a failure after a TTS request may already have been billed."""
+
+    status = _status_code(
+        getattr(getattr(error, "response", None), "status_code", None)
+        or getattr(error, "status_code", None)
+    )
+    return TransientAlibabaError(
+        code="tts_result_processing_failed",
+        status_code=status,
+        request_id=request_id or getattr(error, "request_id", None),
+        submission_may_have_succeeded=True,
+    )
+
+
 class QwenTranslationAdapter:
     """Pinned English-to-Chinese Qwen MT adapter for the podcast pipeline."""
 
@@ -227,7 +247,11 @@ class QwenTranslationAdapter:
     source_language = "en"
     target_language = "zh"
 
-    def __init__(self, transport: DashScopeTransport | Callable[..., Any], api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        transport: DashScopeTransport | Callable[..., Any],
+        api_key: str | None = None,
+    ) -> None:
         self._transport = transport
         self._api_key = api_key
 
@@ -272,6 +296,7 @@ class QwenTranslationAdapter:
             raise TransientAlibabaError(
                 code="invalid_translation_response",
                 request_id=_request_id(response),
+                submission_may_have_succeeded=True,
             )
         return TranslationResult(
             text=translated,
@@ -305,7 +330,9 @@ class QwenTTSAdapter:
         if not isinstance(text, str) or not text:
             raise ValueError("TTS text must be non-empty")
         if len(text) > self.hard_text_limit:
-            raise ValueError(f"TTS text exceeds hard limit of {self.hard_text_limit} characters")
+            raise ValueError(
+                f"TTS text exceeds hard limit of {self.hard_text_limit} characters"
+            )
 
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -326,13 +353,22 @@ class QwenTTSAdapter:
                 events = iter(response)
             except TypeError:
                 events = (response,)
+            except Exception as exc:
+                raise _post_acceptance_error(exc, None) from exc
 
         final_url: str | None = None
         usage: int | float = 0
         request_id: str | None = None
 
-        try:
-            for event in events:
+        iterator = iter(events)
+        while True:
+            try:
+                event = next(iterator)
+            except StopIteration:
+                break
+            except Exception as exc:
+                raise _post_acceptance_error(exc, request_id) from exc
+            try:
                 if not _is_success(event):
                     raise _provider_error(event)
                 request_id = _request_id(event) or request_id
@@ -342,7 +378,11 @@ class QwenTTSAdapter:
 
                 encoded = _path(event, "output", "audio", "data")
                 if encoded:
-                    if isinstance(encoded, str) and "," in encoded and encoded.startswith("data:"):
+                    if (
+                        isinstance(encoded, str)
+                        and "," in encoded
+                        and encoded.startswith("data:")
+                    ):
                         encoded = encoded.split(",", 1)[1]
                     try:
                         # Validate intermediate chunks but do not persist them:
@@ -353,21 +393,24 @@ class QwenTTSAdapter:
                         raise TransientAlibabaError(
                             code="invalid_audio_data",
                             request_id=request_id,
+                            submission_may_have_succeeded=True,
                         ) from exc
 
                 url = _path(event, "output", "audio", "url")
                 if isinstance(url, str) and url:
                     final_url = url
-        except AlibabaProviderError:
-            raise
-        except Exception as exc:
-            raise _transport_failure(exc) from exc
+            except AlibabaProviderError:
+                raise
+            except Exception as exc:
+                raise _post_acceptance_error(exc, request_id) from exc
 
         if final_url:
             audio = self._download(final_url, request_id)
         else:
             raise TransientAlibabaError(
-                code="missing_complete_audio_url", request_id=request_id
+                code="missing_complete_audio_url",
+                request_id=request_id,
+                submission_may_have_succeeded=True,
             )
 
         return SpeechResult(audio=audio, usage=usage, request_id=request_id)
@@ -377,6 +420,7 @@ class QwenTTSAdapter:
             raise PermanentAlibabaError(
                 code="downloader_required",
                 request_id=request_id,
+                submission_may_have_succeeded=True,
             )
         try:
             downloaded = self._downloader(url)
@@ -390,12 +434,19 @@ class QwenTTSAdapter:
         except AlibabaProviderError:
             raise
         except Exception as exc:
-            status = _status_code(getattr(getattr(exc, "response", None), "status_code", None))
-            error_type = PermanentAlibabaError if status is not None and 400 <= status < 500 and status != 429 else TransientAlibabaError
+            status = _status_code(
+                getattr(getattr(exc, "response", None), "status_code", None)
+            )
+            error_type = (
+                PermanentAlibabaError
+                if status is not None and 400 <= status < 500 and status != 429
+                else TransientAlibabaError
+            )
             raise error_type(
                 code="audio_download_failed",
                 status_code=status,
                 request_id=request_id,
+                submission_may_have_succeeded=True,
             ) from exc
 
 

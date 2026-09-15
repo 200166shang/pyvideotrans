@@ -24,7 +24,11 @@ from .report import fingerprint_file, validate_report, write_report
 
 FIRST_RELEASE_FIVE_MINUTE_MS = 115_000
 ENGINEERING_FIVE_MINUTE_MS = 75_000
-BENCHMARK_INPUT_SHA256 = "fba898bc3ff430ef7a2a78516600e6db7d00c33afa4f8b24fda20a1c1387501f"
+PIPELINE_OVERLAP_FIVE_MINUTE_MS = 45_000
+COST_WATCHLINE_CNY_PER_SOURCE_HOUR = 3.85
+BENCHMARK_INPUT_SHA256 = (
+    "fba898bc3ff430ef7a2a78516600e6db7d00c33afa4f8b24fda20a1c1387501f"
+)
 BENCHMARK_INPUT_DURATION_MS = 300_010
 
 
@@ -94,9 +98,7 @@ def run_from_args(
     else:
         source = Path(args.name)
         run_directory = (
-            Path(args.output_dir)
-            if args.output_dir
-            else _default_run_directory(source)
+            Path(args.output_dir) if args.output_dir else _default_run_directory(source)
         )
         result = coordinator.create(
             source,
@@ -126,14 +128,42 @@ def _write_benchmark_summary_from_report(
     with report_path.open("r", encoding="utf-8") as handle:
         report = json.load(handle)
     elapsed_ms = int(report["totals"]["wall_clock_ms"])
+    duration_ms = int(report["input"]["duration_ms"])
+    estimated_cost = float(report["totals"]["cost_confirmed_cny"]) + float(
+        report["totals"]["cost_unconfirmed_cny"]
+    )
+    estimated_cost_per_hour = round(estimated_cost * 3_600_000 / duration_ms, 8)
+    timing_basis = str(report["totals"].get("timing_basis", "wall-clock"))
+    state_path = run_directory / "run.private.json"
+    if state_path.is_file():
+        with state_path.open("r", encoding="utf-8") as handle:
+            private_basis = str(json.load(handle).get("timing_basis", "wall-clock"))
+        if private_basis != timing_basis:
+            raise PodcastPipelineError(
+                "benchmark_state_invalid", "Benchmark timing basis does not match"
+            )
+    if timing_basis not in {"wall-clock", "active-process"}:
+        raise PodcastPipelineError(
+            "benchmark_state_invalid", "Benchmark timing basis is invalid"
+        )
+    uninterrupted = timing_basis == "wall-clock"
     summary = {
         "schema_version": 1,
         "run_id": report["run"]["id"],
         "elapsed_ms": elapsed_ms,
         "first_release_target_ms": FIRST_RELEASE_FIVE_MINUTE_MS,
         "engineering_target_ms": ENGINEERING_FIVE_MINUTE_MS,
+        "pipeline_overlap_target_ms": PIPELINE_OVERLAP_FIVE_MINUTE_MS,
         "meets_first_release_target": elapsed_ms <= FIRST_RELEASE_FIVE_MINUTE_MS,
         "meets_engineering_target": elapsed_ms <= ENGINEERING_FIVE_MINUTE_MS,
+        "meets_pipeline_overlap_target": uninterrupted
+        and elapsed_ms <= PIPELINE_OVERLAP_FIVE_MINUTE_MS,
+        "timing_basis": timing_basis,
+        "uninterrupted_process": uninterrupted,
+        "estimated_cost_per_source_hour_cny": estimated_cost_per_hour,
+        "cost_watchline_per_source_hour_cny": COST_WATCHLINE_CNY_PER_SOURCE_HOUR,
+        "exceeds_cost_watchline": estimated_cost_per_hour
+        > COST_WATCHLINE_CNY_PER_SOURCE_HOUR,
         "listening_quality_status": report["listening_quality_gate"]["status"],
         "fixed_sample_validated": True,
     }
@@ -153,9 +183,7 @@ def _validate_benchmark_identity(fingerprint: str, duration_ms: int) -> None:
 
 def _validate_benchmark_run(run_directory: Path) -> None:
     try:
-        with (run_directory / "run.private.json").open(
-            "r", encoding="utf-8"
-        ) as handle:
+        with (run_directory / "run.private.json").open("r", encoding="utf-8") as handle:
             state = json.load(handle)
         fingerprint = str(state.get("input_fingerprint", ""))
         duration_ms = int(state.get("input_duration_ms", -1))
