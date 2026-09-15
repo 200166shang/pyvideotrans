@@ -5,6 +5,11 @@ import pytest
 from cli import build_parser, validate_task_params
 
 
+def test_omitted_profile_is_resolved_by_new_run_or_saved_run() -> None:
+    args = build_parser().parse_args(["--task", "podcast"])
+    assert args.podcast_profile is None
+
+
 def test_parser_accepts_podcast_profile_and_report(tmp_path: Path) -> None:
     source = tmp_path / "source.m4a"
     source.touch()

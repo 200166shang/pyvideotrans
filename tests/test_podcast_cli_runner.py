@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 
 from videotrans.podcast.cli_runner import (
+    _select_profile,
     _validate_benchmark_identity,
     _write_benchmark_summary_from_report,
     run_from_args,
 )
 from videotrans.podcast.orchestrator import PodcastPipelineError, PodcastRunResult
+from videotrans.podcast.profiles import DEFAULT_PODCAST_PROFILE
 
 
 class FakeCoordinator:
@@ -86,6 +88,59 @@ def test_cli_runner_creates_new_run(tmp_path, monkeypatch, capsys) -> None:
         "cold",
     )
     assert "Output MP3:" in capsys.readouterr().out
+
+
+def test_new_run_uses_accepted_profile_when_omitted(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "videotrans.podcast.cli_runner.PodcastCoordinator", FakeCoordinator
+    )
+    selected = []
+    run_from_args(
+        _args(tmp_path, podcast_profile=None),
+        runtime_factory=lambda profile: selected.append(profile),
+    )
+    assert selected == [DEFAULT_PODCAST_PROFILE]
+    assert selected[0].id == "alibaba-podcast-tts-throughput"
+
+
+@pytest.mark.parametrize(
+    "profile_id", ["alibaba-podcast-v2", "alibaba-podcast-tts-throughput"]
+)
+def test_resume_keeps_saved_profile_after_default_changes(
+    tmp_path, monkeypatch, profile_id
+) -> None:
+    (tmp_path / "run.private.json").write_text(json.dumps({"profile_id": profile_id}))
+    monkeypatch.setattr(
+        "videotrans.podcast.cli_runner.PodcastCoordinator", FakeCoordinator
+    )
+    monkeypatch.setattr(
+        "videotrans.podcast.cli_runner.load_terminal_run", lambda *args, **kwargs: None
+    )
+    selected = []
+    run_from_args(
+        _args(tmp_path, podcast_profile=None, resume=str(tmp_path)),
+        runtime_factory=lambda profile: selected.append(profile),
+    )
+    assert selected[0].id == profile_id
+
+
+@pytest.mark.parametrize(
+    "saved", [{}, {"profile_id": "unknown"}, {"profile_id": None}, []]
+)
+def test_invalid_saved_profile_never_falls_back_to_new_default(tmp_path, saved) -> None:
+    (tmp_path / "run.private.json").write_text(json.dumps(saved))
+    with pytest.raises(PodcastPipelineError, match="valid production profile"):
+        _select_profile(None, str(tmp_path))
+
+
+def test_explicit_profile_is_not_silently_overridden_on_resume(tmp_path) -> None:
+    (tmp_path / "run.private.json").write_text(
+        json.dumps({"profile_id": "alibaba-podcast-v2"})
+    )
+    assert (
+        _select_profile("alibaba-podcast-tts-throughput", str(tmp_path))
+        is DEFAULT_PODCAST_PROFILE
+    )
 
 
 def test_benchmark_writes_small_target_summary(tmp_path, monkeypatch) -> None:

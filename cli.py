@@ -335,8 +335,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--name', type=str, help=tr("help_name"))
     parser.add_argument('--resume', type=str, default=None,
                         help="Resume a podcast run from its run directory")
-    parser.add_argument('--podcast-profile', type=str, default='alibaba-podcast-v2',
-                        help="Podcast production profile")
+    parser.add_argument('--podcast-profile', type=str, default=None,
+                        help="Podcast profile (new runs: alibaba-podcast-tts-throughput; resume: saved profile)")
     parser.add_argument('--cache-mode', choices=['cold'], default='cold',
                         help="Podcast benchmark cache mode")
     parser.add_argument('--report', type=str, default=None,
