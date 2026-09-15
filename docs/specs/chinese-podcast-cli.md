@@ -105,7 +105,7 @@ Provider adapters return data and numeric metadata; they never change run state.
 
 - Submit one asynchronous whole-file task.
 - Persist the Alibaba task ID before the first poll.
-- Persist a local `in_flight` submission marker immediately before the submit call. If the process stops after that marker but before the task ID is durably saved, recovery stops with `asr_submission_uncertain`; it never submits a second paid task automatically. The operator must check Alibaba's task history and either restore the task ID manually or start a new run.
+- Persist a local `in_flight` submission marker immediately before the submit call. If the process stops after that marker but before the task ID is durably saved, recovery stops with `asr_submission_uncertain`; it never submits a second paid task automatically. This release cannot attach a discovered task ID, so the operator checks Alibaba's task history for cost/accounting and starts a new run only after explicitly accepting another submission.
 - Poll every 2–5 seconds with bounded backoff.
 - On resume, poll the saved task ID rather than submit again.
 - Persist timestamped English segments and numeric usage as a private stage artifact; the public report stores only its fingerprint and counts.

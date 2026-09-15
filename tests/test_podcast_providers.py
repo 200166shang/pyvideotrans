@@ -250,6 +250,20 @@ def test_asr_http_url_does_not_enable_oss_resolution():
     assert "X-dashscope-ossresourceresolve" not in captured[0].headers
 
 
+def test_asr_result_download_omits_content_type_from_signed_get():
+    captured = []
+
+    def opener(request, timeout):
+        captured.append(request)
+        return FakeHttpResponse({"transcripts": []})
+
+    transport = AlibabaAsrHttpTransport(None, lambda: "secret", opener=opener)
+
+    transport.download_result("https://example/result.json?signature=redacted")
+
+    assert "Content-type" not in captured[0].headers
+
+
 def test_tts_url_download_uses_requests_timeout():
     dashscope = FakeDashScope()
     dashscope.MultiModalConversation.call = lambda **kwargs: {

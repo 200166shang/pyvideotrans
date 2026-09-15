@@ -410,7 +410,10 @@ class AlibabaAsrHttpTransport:
         resolve_oss: bool = False,
         authenticated: bool = True,
     ) -> Mapping[str, Any]:
-        headers = {"Content-Type": "application/json"}
+        # A Content-Type header on the pre-signed result GET changes the OSS
+        # signature inputs and can produce a 403. Only requests with JSON
+        # bodies declare that media type.
+        headers = {"Content-Type": "application/json"} if payload is not None else {}
         if authenticated:
             api_key = self._api_key_provider()
             if not api_key:
