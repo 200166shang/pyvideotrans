@@ -357,17 +357,23 @@ class AlibabaAsrHttpTransport:
 
     def __init__(
         self,
-        workspace_id: str,
-        api_key_provider: Callable[[], str],
+        workspace_id: str | None,
+        api_key_provider: Callable[[], str] | None,
         *,
+        base_url: str | None = None,
         timeout_seconds: float = 30.0,
         opener: Callable[..., Any] = urlopen,
     ) -> None:
-        if not workspace_id:
-            raise ValueError("workspace_id is required")
-        self._base_url = (
-            f"https://{workspace_id}.cn-beijing.maas.aliyuncs.com/api/v1"
-        )
+        if api_key_provider is None:
+            raise ValueError("api_key_provider is required")
+        if base_url:
+            self._base_url = base_url.rstrip("/")
+        elif workspace_id:
+            self._base_url = (
+                f"https://{workspace_id}.cn-beijing.maas.aliyuncs.com/api/v1"
+            )
+        else:
+            self._base_url = "https://dashscope.aliyuncs.com/api/v1"
         self._api_key_provider = api_key_provider
         self._timeout_seconds = timeout_seconds
         self._opener = opener
@@ -376,11 +382,16 @@ class AlibabaAsrHttpTransport:
         return f"{self.__class__.__name__}(region='cn-beijing')"
 
     def submit(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        file_urls = payload.get("input", {}).get("file_urls", [])
+        resolve_oss = any(
+            isinstance(url, str) and url.startswith("oss://") for url in file_urls
+        )
         return self._request(
             "POST",
             f"{self._base_url}/services/audio/asr/transcription",
             payload=payload,
             asynchronous=True,
+            resolve_oss=resolve_oss,
         )
 
     def poll(self, task_id: str) -> Mapping[str, Any]:
@@ -396,6 +407,7 @@ class AlibabaAsrHttpTransport:
         *,
         payload: Mapping[str, Any] | None = None,
         asynchronous: bool = False,
+        resolve_oss: bool = False,
         authenticated: bool = True,
     ) -> Mapping[str, Any]:
         headers = {"Content-Type": "application/json"}
@@ -408,6 +420,8 @@ class AlibabaAsrHttpTransport:
             headers["Authorization"] = f"Bearer {api_key}"
         if asynchronous:
             headers["X-DashScope-Async"] = "enable"
+        if resolve_oss:
+            headers["X-DashScope-OssResourceResolve"] = "enable"
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = Request(url, data=body, headers=headers, method=method)
         try:
