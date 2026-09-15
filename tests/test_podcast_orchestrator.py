@@ -87,14 +87,18 @@ class FakeTts:
         return SpeechResult(audio=_fake_wav(), usage=len(text), request_id=None)
 
 
-def _fake_wav(*, frames: int = 160) -> bytes:
+def _fake_wav(*, frames: int = 160, streaming_header: bool = False) -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as audio:
         audio.setnchannels(1)
         audio.setsampwidth(2)
         audio.setframerate(16_000)
         audio.writeframes(b"\0\0" * frames)
-    return output.getvalue()
+    result = bytearray(output.getvalue())
+    if streaming_header:
+        struct.pack_into("<I", result, 4, 0x7FFFFFBF)
+        struct.pack_into("<I", result, 40, 0x7FFFFFDB)
+    return bytes(result)
 
 
 class FakeFinalizer:
@@ -772,6 +776,13 @@ def test_invalid_provider_audio_stays_uncertain_and_is_not_resubmitted(
     with pytest.raises(PodcastPipelineError, match="may already have been billed"):
         coordinator.resume(run_dir)
     assert len(tts.calls) == 1
+
+
+def test_tts_validation_accepts_streaming_wav_size_sentinels(tmp_path) -> None:
+    artifact = tmp_path / "streaming.wav"
+    artifact.write_bytes(_fake_wav(streaming_header=True))
+
+    podcast_orchestrator._validate_tts_audio(artifact)
 
 
 def test_resume_rejects_missing_tts_usage_descriptor(tmp_path, monkeypatch) -> None:

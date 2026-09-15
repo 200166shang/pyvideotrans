@@ -1446,7 +1446,6 @@ def _validate_tts_audio(path: Path) -> None:
                 "-nostdin",
                 "-v",
                 "error",
-                "-xerror",
                 "-i",
                 str(path),
                 "-map",
